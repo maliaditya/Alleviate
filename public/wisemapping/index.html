@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WiseMapping</title>
+    <script>
+      window.alleviatePrompt = (message) => new Promise((resolve) => {
+        const requestId = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+        const onResponse = (event) => {
+          const response = event.data;
+          if (event.origin !== window.location.origin || event.source !== window.parent || response?.type !== "alleviate-dialog-response" || response.requestId !== requestId) return;
+          window.removeEventListener("message", onResponse);
+          resolve(typeof response.value === "string" ? response.value : null);
+        };
+        window.addEventListener("message", onResponse);
+        window.parent.postMessage({ type: "alleviate-dialog-prompt", requestId, message }, window.location.origin);
+      });
+    </script>
+    <script type="module" crossorigin src="/wisemapping/assets/index-DVqc1Mhi.js"></script>
+    <link rel="stylesheet" crossorigin href="/wisemapping/assets/index-DgEfGjHu.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
