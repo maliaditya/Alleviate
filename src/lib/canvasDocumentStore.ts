@@ -30,6 +30,9 @@ export async function loadCanvasDocuments<T extends { id: string }>(): Promise<T
   });
   if (documents.length) {
     lastSavedDocuments = new Map(documents.map((document) => [document.id, document]));
+    // IndexedDB already has the current documents, so any leftover legacy payload is redundant
+    // and can keep the browser quota full for imports from older app builds.
+    try { localStorage.removeItem(LEGACY_KEY); } catch { /* IndexedDB remains usable if cleanup is blocked. */ }
     return documents;
   }
   if (localStorage.getItem(MIGRATED_KEY) === "1") return [];
@@ -40,8 +43,14 @@ export async function loadCanvasDocuments<T extends { id: string }>(): Promise<T
     const parsed = JSON.parse(localStorage.getItem(LEGACY_KEY) || "[]");
     if (Array.isArray(parsed)) legacy = parsed.filter((item) => item && typeof item.id === "string");
   } catch { /* Ignore malformed legacy data. */ }
-  if (legacy.length) await saveCanvasDocuments(legacy);
-  localStorage.setItem(MIGRATED_KEY, "1");
+  if (legacy.length) {
+    await saveCanvasDocuments(legacy);
+    // Once the complete legacy payload is safely in IndexedDB, release its localStorage quota.
+    try { localStorage.removeItem(LEGACY_KEY); } catch { /* Keep the migrated copy in IndexedDB. */ }
+  }
+  try { localStorage.setItem(MIGRATED_KEY, "1"); } catch {
+    // IndexedDB is the source of truth; do not block canvas loading if localStorage is full.
+  }
   return legacy;
 }
 

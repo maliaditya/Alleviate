@@ -154,3 +154,42 @@ export async function loadCanvasFiles(
   }));
   return files;
 }
+
+/** Loads image blobs without converting them to base64 strings on the UI thread. */
+export async function loadCanvasFileBlobs(
+  canvasId: string,
+  filesMeta?: CanvasFileMetaMap,
+  legacyFiles?: Record<string, any>,
+): Promise<Record<string, Blob>> {
+  const files: Record<string, Blob> = {};
+  const fileIds = new Set([...Object.keys(filesMeta || {}), ...Object.keys(legacyFiles || {})]);
+  await Promise.all(Array.from(fileIds).map(async (fileId) => {
+    const meta = filesMeta?.[fileId];
+    try {
+      const record = await getRecord(`${canvasId}:${fileId}`);
+      if (record?.blob) {
+        files[fileId] = record.blob;
+        return;
+      }
+      const legacy = legacyFiles?.[fileId];
+      if (!legacy?.dataURL) return;
+      const blob = dataUrlToBlob(legacy.dataURL);
+      files[fileId] = blob;
+      try {
+        await putRecord({
+          key: `${canvasId}:${fileId}`,
+          blob,
+          mimeType: legacy.mimeType || meta?.mimeType || blob.type || "application/octet-stream",
+          created: legacy.created ?? meta?.created,
+          lastRetrieved: legacy.lastRetrieved ?? meta?.lastRetrieved,
+        });
+      } catch { /* The legacy inline copy remains available if migration fails. */ }
+    } catch {
+      const legacy = legacyFiles?.[fileId];
+      if (legacy?.dataURL) {
+        try { files[fileId] = dataUrlToBlob(legacy.dataURL); } catch { /* Skip malformed legacy images. */ }
+      }
+    }
+  }));
+  return files;
+}

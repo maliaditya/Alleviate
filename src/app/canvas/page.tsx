@@ -45,10 +45,28 @@ const CanvasDrawingSurface = memo(function CanvasDrawingSurface({
   const initialFilesRef = useRef(files);
   const loadedDocumentIdRef = useRef(document.id);
   const suppressChangeRef = useRef(false);
+  const editingTextElementIdRef = useRef<string | null>(null);
   const handleApi = useCallback((nextApi: any) => setApi(nextApi), []);
   const handleChange = useCallback((elements: readonly any[], appState: any, nextFiles: Record<string, any>) => {
     if (!suppressChangeRef.current) onChange(elements, appState, nextFiles);
-  }, [onChange]);
+    const editingTextId = appState.editingElement?.type === "text" ? appState.editingElement.id : null;
+    const previousEditingTextId = editingTextElementIdRef.current;
+    editingTextElementIdRef.current = editingTextId;
+    if (!previousEditingTextId || editingTextId) return;
+    const source = elements.find((element) => element.id === previousEditingTextId);
+    if (!source || source.type !== "text") return;
+    const sourceDocumentId = document.id;
+    window.requestAnimationFrame(() => {
+      void import("@excalidraw/excalidraw").then(({ convertToExcalidrawElements }) => {
+        if (loadedDocumentIdRef.current !== sourceDocumentId) return;
+        const currentElements = api?.getSceneElements?.() || elements;
+        const currentText = currentElements.find((element: any) => element.id === previousEditingTextId);
+        if (!currentText || currentText.type !== "text") return;
+        const converted = convertMarkdownTableElement(currentElements, currentText, convertToExcalidrawElements);
+        if (converted) api?.updateScene?.({ elements: converted });
+      }).catch(() => undefined);
+    });
+  }, [api, document.id, onChange]);
   useEffect(() => {
     onApi(api);
     return () => onApi(null);
@@ -101,17 +119,116 @@ const CanvasDrawingSurface = memo(function CanvasDrawingSurface({
   );
 }, (previous, next) => previous.document.id === next.document.id && previous.files === next.files && previous.onChange === next.onChange);
 
+type ExcalidrawElementConverter = typeof import("@excalidraw/excalidraw")["convertToExcalidrawElements"];
+
+function parseMarkdownTable(text: string): string[][] | null {
+  const rows = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const escapedPipe = "\uE000";
+    const normalized = line.replace(/\\\|/g, escapedPipe).replace(/^\|/, "").replace(/\|$/, "");
+    return normalized.split("|").map((cell) => cell.replaceAll(escapedPipe, "|").trim());
+  });
+  if (rows.length < 3 || rows[1].length < 2 || !rows[1].every((cell) => /^:?-{3,}:?$/.test(cell))) return null;
+  const data = rows.filter((row) => !row.every((cell) => /^:?-{3,}:?$/.test(cell)));
+  const columnCount = Math.max(0, ...data.map((row) => row.length));
+  if (data.length < 2 || columnCount < 2) return null;
+  return data.map((row) => Array.from({ length: columnCount }, (_, index) => row[index] || ""));
+}
+
+function wrapTableCell(value: string, maxCharacters: number) {
+  const words = value.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let line = "";
+  for (const word of words) {
+    if (word.length > maxCharacters) {
+      if (line) lines.push(line);
+      line = "";
+      for (let index = 0; index < word.length; index += maxCharacters) lines.push(word.slice(index, index + maxCharacters));
+    } else if (!line) line = word;
+    else if (`${line} ${word}`.length <= maxCharacters) line += ` ${word}`;
+    else { lines.push(line); line = word; }
+  }
+  if (line) lines.push(line);
+  return lines.length ? lines.join("\n") : " ";
+}
+
+function convertMarkdownTableElement(elements: readonly any[], source: any, convert: ExcalidrawElementConverter) {
+  if (source.type !== "text" || source.isDeleted || source.customData?.canvasMarkdownTable) return null;
+  const rows = parseMarkdownTable(source.text || "");
+  if (!rows) return null;
+
+  const fontSize = Math.max(16, Number(source.fontSize) || 20);
+  const columnCount = rows[0].length;
+  const charsPerColumn = Array.from({ length: columnCount }, (_, column) => {
+    const cells = rows.map((row) => row[column]);
+    let chars = Math.max(14, Math.ceil(Math.max(...cells.map((cell) => cell.length)) / 6));
+    while (cells.some((cell) => wrapTableCell(cell, chars).split("\n").length > 6)) chars += 2;
+    return chars;
+  });
+  const widths = charsPerColumn.map((chars) => Math.max(128, chars * fontSize * 0.56 + 24));
+  const wrappedRows = rows.map((row) => row.map((cell, column) => wrapTableCell(cell, charsPerColumn[column])));
+  const heights = wrappedRows.map((row, rowIndex) => {
+    const maxLines = Math.max(...row.map((cell) => cell.split("\n").length));
+    const size = rowIndex === 0 ? fontSize * 1.08 : fontSize;
+    return Math.max(size * 1.8, maxLines * size * 1.22 + 14);
+  });
+  const groupId = `markdown-table-${source.id}`;
+  const additions: any[] = [];
+  let y = source.y;
+  const makeElement = (skeleton: Record<string, any>) => {
+    const element = convert([skeleton as any])[0];
+    return { ...element, ...skeleton, id: element.id, version: element.version, versionNonce: element.versionNonce, updated: element.updated, isDeleted: element.isDeleted };
+  };
+
+  wrappedRows.forEach((row, rowIndex) => {
+    let x = source.x;
+    row.forEach((cellText, columnIndex) => {
+      const width = widths[columnIndex];
+      const height = heights[rowIndex];
+      const metadata = { canvasMarkdownTable: { groupId, row: rowIndex, column: columnIndex } };
+      additions.push(makeElement({
+        type: "rectangle", x, y, width, height, angle: 0,
+        strokeColor: "#393b42", backgroundColor: rowIndex === 0 ? "#222329" : "transparent",
+        fillStyle: "solid", strokeWidth: 1, strokeStyle: "solid", roughness: 0,
+        opacity: source.opacity ?? 100, roundness: null, groupIds: [groupId], frameId: source.frameId ?? null,
+        customData: { ...metadata, role: "cell" },
+      }));
+      additions.push(makeElement({
+        type: "text", x: x + 12, y: y + 8, text: cellText, fontSize: rowIndex === 0 ? fontSize * 1.08 : fontSize,
+        fontFamily: source.fontFamily ?? 2, textAlign: "left", verticalAlign: "top",
+        strokeColor: "#f4f4f5", backgroundColor: "transparent", strokeWidth: 1, roughness: 0,
+        opacity: source.opacity ?? 100, groupIds: [groupId], frameId: source.frameId ?? null,
+        customData: { ...metadata, role: "text" },
+      }));
+      x += width;
+    });
+    y += heights[rowIndex];
+  });
+
+  return elements.map((element) => element.id === source.id ? { ...element, isDeleted: true } : element).concat(additions);
+}
+
 const WORKSPACE_KEY = "alleviate-canvas-workspace-v1";
 const EMPTY_FILES: Record<string, any> = {};
 const CANVAS_THUMBNAIL_CACHE_NAME = "alleviate-canvas-thumbnails-v1";
 const CANVAS_THUMBNAIL_CACHE_URL = "https://alleviate.local/canvas-thumbnail/";
-const CANVAS_THUMBNAIL_VERSION = "v3";
+const CANVAS_THUMBNAIL_VERSION = "v17";
 const CANVAS_THUMBNAIL_INDEX_KEY = "alleviate-canvas-thumbnail-index-v1";
 const CANVAS_THUMBNAIL_MAX_ENTRIES = 36;
 type CanvasThumbnail = { markup: string; revision: number };
+type CanvasThumbnailJob = { run: () => void; cancel: () => void; started: boolean; controller: AbortController };
 const canvasThumbnailMemoryCache = new Map<string, CanvasThumbnail>();
-const canvasThumbnailQueue: Array<() => void> = [];
+const canvasThumbnailQueue: CanvasThumbnailJob[] = [];
 let canvasThumbnailRenderScheduled = false;
+
+function rememberCanvasThumbnail(key: string, thumbnail: CanvasThumbnail) {
+  canvasThumbnailMemoryCache.delete(key);
+  canvasThumbnailMemoryCache.set(key, thumbnail);
+  while (canvasThumbnailMemoryCache.size > CANVAS_THUMBNAIL_MAX_ENTRIES) {
+    const oldestKey = canvasThumbnailMemoryCache.keys().next().value as string | undefined;
+    if (!oldestKey) break;
+    canvasThumbnailMemoryCache.delete(oldestKey);
+  }
+}
 
 function rememberCanvasFiles(cache: Map<string, Record<string, any>>, canvasId: string, files: Record<string, any>) {
   cache.delete(canvasId);
@@ -123,16 +240,31 @@ function rememberCanvasFiles(cache: Map<string, Record<string, any>>, canvasId: 
   }
 }
 
-function scheduleCanvasThumbnailRender<T>(render: () => Promise<T>): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    canvasThumbnailQueue.push(() => {
-      void render().then(resolve, reject).finally(() => {
+function scheduleCanvasThumbnailRender<T>(render: (signal: AbortSignal) => Promise<T>): { promise: Promise<T | null>; cancel: () => void } {
+  let resolveJob: (value: T | null) => void = () => {};
+  let rejectJob: (reason?: unknown) => void = () => {};
+  const promise = new Promise<T | null>((resolve, reject) => { resolveJob = resolve; rejectJob = reject; });
+  const job: CanvasThumbnailJob = {
+    started: false,
+    controller: new AbortController(),
+    cancel: () => {
+      job.controller.abort();
+      if (job.started) return;
+      const index = canvasThumbnailQueue.indexOf(job);
+      if (index !== -1) canvasThumbnailQueue.splice(index, 1);
+      resolveJob(null);
+    },
+    run: () => {
+      job.started = true;
+      void render(job.controller.signal).then(resolveJob, rejectJob).finally(() => {
         canvasThumbnailRenderScheduled = false;
         scheduleNextCanvasThumbnailRender();
       });
-    });
-    scheduleNextCanvasThumbnailRender();
-  });
+    },
+  };
+  canvasThumbnailQueue.push(job);
+  scheduleNextCanvasThumbnailRender();
+  return { promise, cancel: job.cancel };
 }
 
 function scheduleNextCanvasThumbnailRender() {
@@ -141,7 +273,7 @@ function scheduleNextCanvasThumbnailRender() {
   const start = () => {
     const next = canvasThumbnailQueue.shift();
     if (!next) { canvasThumbnailRenderScheduled = false; return; }
-    next();
+    next.run();
   };
   if (typeof window !== "undefined" && "requestIdleCallback" in window) {
     window.requestIdleCallback((deadline) => {
@@ -151,7 +283,7 @@ function scheduleNextCanvasThumbnailRender() {
         return;
       }
       start();
-    });
+    }, { timeout: 900 });
   } else {
     setTimeout(start, 120);
   }
@@ -159,7 +291,7 @@ function scheduleNextCanvasThumbnailRender() {
 
 const thumbnailCacheRequest = (key: string) => new Request(`${CANVAS_THUMBNAIL_CACHE_URL}${encodeURIComponent(key)}`);
 
-async function readCanvasThumbnail(key: string, legacyKey: string, legacyRevision: number): Promise<CanvasThumbnail | null> {
+async function readCanvasThumbnail(key: string, legacyKeys: string[], legacyRevision: number): Promise<CanvasThumbnail | null> {
   const memoryValue = canvasThumbnailMemoryCache.get(key);
   if (memoryValue) {
     canvasThumbnailMemoryCache.delete(key);
@@ -172,20 +304,23 @@ async function readCanvasThumbnail(key: string, legacyKey: string, legacyRevisio
     let response = await cache.match(thumbnailCacheRequest(key));
     let migratedLegacyPreview = false;
     if (!response) {
-      response = await cache.match(thumbnailCacheRequest(legacyKey));
-      migratedLegacyPreview = Boolean(response);
+      for (const legacyKey of legacyKeys) {
+        response = await cache.match(thumbnailCacheRequest(legacyKey));
+        if (response) {
+          migratedLegacyPreview = true;
+          break;
+        }
+      }
     }
     if (!response) return null;
     const markup = await response.text();
-    if (/(?:href|xlink:href)=[\"'](?:blob:|filesystem:|webkit-fake-url:)/i.test(markup)) {
-      await cache.delete(thumbnailCacheRequest(key));
-      return null;
-    }
-    const revision = Number(response.headers.get("x-canvas-revision")) || (migratedLegacyPreview ? legacyRevision : 0);
+    if (!markup || !markup.includes("<svg")) return null;
+    const revision = migratedLegacyPreview ? -1 : Number(response.headers.get("x-canvas-revision")) || legacyRevision;
     const thumbnail = { markup, revision };
-    canvasThumbnailMemoryCache.set(key, thumbnail);
-    writeCanvasThumbnailIndex(key);
-    if (migratedLegacyPreview) void writeCanvasThumbnail(key, markup, revision);
+    rememberCanvasThumbnail(key, thumbnail);
+    const evictedKeys = writeCanvasThumbnailIndex(key);
+    await Promise.all(evictedKeys.map((evictedKey) => cache.delete(thumbnailCacheRequest(evictedKey))));
+    evictedKeys.forEach((evictedKey) => canvasThumbnailMemoryCache.delete(evictedKey));
     return thumbnail;
   } catch {
     return null;
@@ -193,14 +328,9 @@ async function readCanvasThumbnail(key: string, legacyKey: string, legacyRevisio
 }
 
 async function writeCanvasThumbnail(key: string, markup: string, revision: number) {
-  canvasThumbnailMemoryCache.delete(key);
-  canvasThumbnailMemoryCache.set(key, { markup, revision });
-  while (canvasThumbnailMemoryCache.size > CANVAS_THUMBNAIL_MAX_ENTRIES) {
-    const oldestKey = canvasThumbnailMemoryCache.keys().next().value as string | undefined;
-    if (!oldestKey) break;
-    canvasThumbnailMemoryCache.delete(oldestKey);
-  }
+  rememberCanvasThumbnail(key, { markup, revision });
   const evictedKeys = writeCanvasThumbnailIndex(key);
+  evictedKeys.forEach((evictedKey) => canvasThumbnailMemoryCache.delete(evictedKey));
   if (typeof window === "undefined" || !("caches" in window)) return;
   try {
     const cache = await window.caches.open(CANVAS_THUMBNAIL_CACHE_NAME);
@@ -227,22 +357,18 @@ function writeCanvasThumbnailIndex(key: string) {
   return evicted;
 }
 
-async function clearCanvasThumbnailCache() {
-  canvasThumbnailMemoryCache.clear();
-  if (typeof window !== "undefined") window.localStorage.removeItem(CANVAS_THUMBNAIL_INDEX_KEY);
-  if (typeof window !== "undefined" && "caches" in window) {
-    try { await window.caches.delete(CANVAS_THUMBNAIL_CACHE_NAME); } catch { /* ignore cache cleanup failures */ }
-  }
-}
-
-const makeCanvas = (name = "Untitled canvas"): CanvasDocument => ({
-  id: crypto.randomUUID(),
-  name,
-  updatedAt: Date.now(),
-  elements: [],
-  appState: { theme: "dark" },
-  files: {},
-});
+const makeCanvas = (name = "Untitled canvas"): CanvasDocument => {
+  const now = Date.now();
+  return {
+    id: crypto.randomUUID(),
+    name,
+    updatedAt: now,
+    previewUpdatedAt: now,
+    elements: [],
+    appState: { theme: "dark" },
+    files: {},
+  };
+};
 
 type SceneSnapshot = {
   elements: readonly any[];
@@ -283,28 +409,45 @@ function sameFileReferences(previous: Record<string, any>, next: Record<string, 
 // elements to SVG is synchronous work on the main thread, so use a spatially
 // representative subset for unusually large scenes. The actual canvas remains
 // complete and is never modified by this preview-only sampling.
-const MAX_CANVAS_PREVIEW_ELEMENTS = 160;
+function getPreviewColorLuminance(color: unknown): number | null {
+  if (typeof color !== "string") return null;
+  const normalized = color.trim().toLowerCase();
+  if (normalized === "black") return 0;
+  if (normalized === "white") return 1;
+  const hex = /^#([\da-f]{3}|[\da-f]{6})$/i.exec(normalized)?.[1];
+  if (!hex) return null;
+  const expanded = hex.length === 3 ? hex.split("").map((value) => `${value}${value}`).join("") : hex;
+  const channels = [0, 2, 4].map((offset) => parseInt(expanded.slice(offset, offset + 2), 16) / 255);
+  const [red, green, blue] = channels.map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
 
-function getCanvasPreviewElements(elements: any[]) {
-  if (elements.length <= MAX_CANVAS_PREVIEW_ELEMENTS) return elements;
-
-  const sampled: any[] = [];
-  const lastIndex = elements.length - 1;
-  for (let index = 0; index < MAX_CANVAS_PREVIEW_ELEMENTS; index += 1) {
-    const sourceIndex = Math.round(index * lastIndex / (MAX_CANVAS_PREVIEW_ELEMENTS - 1));
-    sampled.push(elements[sourceIndex]);
+function getPreviewBackgroundColor(elements: any[]) {
+  let darkColorCount = 0;
+  let lightColorCount = 0;
+  for (const element of elements) {
+    if (element.type === "image") continue;
+    for (const color of [element.strokeColor, element.backgroundColor]) {
+      const luminance = getPreviewColorLuminance(color);
+      if (luminance === null) continue;
+      if (luminance < 0.42) darkColorCount += 1;
+      else lightColorCount += 1;
+    }
   }
-  return sampled;
+  // Use a light surface when the source scene mostly uses dark ink, and a dark
+  // surface when it mostly uses light ink. This keeps original element colors
+  // intact while avoiding dark-on-dark or light-on-light previews.
+  return darkColorCount >= lightColorCount ? "#f2f3f5" : "#1b1c20";
 }
 
 function CanvasCardPreview({ document, refreshSeed }: { document: CanvasDocument; refreshSeed: number }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const renderedRefreshSeedRef = useRef(refreshSeed);
   const liveElements = useMemo(() => document.elements?.filter((element) => !element.isDeleted) ?? [], [document.elements]);
-  const previewElements = useMemo(() => getCanvasPreviewElements(liveElements), [liveElements]);
+  const previewBackgroundColor = useMemo(() => getPreviewBackgroundColor(liveElements), [liveElements]);
   const cacheKey = `${CANVAS_THUMBNAIL_VERSION}:${document.id}`;
   const desiredRevision = document.previewUpdatedAt ?? document.updatedAt;
-  const legacyCacheKey = `v2:0:${document.id}:${desiredRevision}`;
+  const legacyCacheKeys = useMemo(() => [], []);
   const [previewState, setPreviewState] = useState<{ key: string } & CanvasThumbnail | null>(null);
   const [resolvedCacheKey, setResolvedCacheKey] = useState<string | null>(() => canvasThumbnailMemoryCache.has(cacheKey) ? cacheKey : null);
   const [isNearViewport, setIsNearViewport] = useState(false);
@@ -318,13 +461,13 @@ function CanvasCardPreview({ document, refreshSeed }: { document: CanvasDocument
     let cancelled = false;
     if (!liveElements.length) return;
 
-    void readCanvasThumbnail(cacheKey, legacyCacheKey, desiredRevision).then((cachedThumbnail) => {
+    void readCanvasThumbnail(cacheKey, legacyCacheKeys, desiredRevision).then((cachedThumbnail) => {
       if (cancelled) return;
       if (cachedThumbnail) setPreviewState({ key: cacheKey, ...cachedThumbnail });
       setResolvedCacheKey(cacheKey);
     });
     return () => { cancelled = true; };
-  }, [cacheKey, desiredRevision, legacyCacheKey, liveElements.length]);
+  }, [cacheKey, desiredRevision, legacyCacheKeys, liveElements.length]);
 
   useEffect(() => {
     if (!cacheReady || (!needsRefresh && !forceRefresh) || !liveElements.length) return;
@@ -347,32 +490,39 @@ function CanvasCardPreview({ document, refreshSeed }: { document: CanvasDocument
   useEffect(() => {
     let cancelled = false;
     if (!cacheReady || !isNearViewport || (!needsRefresh && !forceRefresh) || !liveElements.length) return;
+    let renderJob: { promise: Promise<string | null>; cancel: () => void } | null = null;
     void (async () => {
       try {
-        const referencedFileIds = new Set(previewElements
+        const referencedFileIds = new Set(liveElements
           .filter((element) => element.type === "image" && typeof element.fileId === "string")
           .map((element) => element.fileId as string));
         const previewFileMeta = Object.fromEntries(Object.entries(document.fileMeta || {}).filter(([id]) => referencedFileIds.has(id)));
         const previewLegacyFiles = Object.fromEntries(Object.entries(document.files || {}).filter(([id]) => referencedFileIds.has(id)));
-        const svg = await scheduleCanvasThumbnailRender(async () => {
-          if (cancelled) return null;
-          const [files, { exportToSvg }] = await Promise.all([
-            loadCanvasFiles(document.id, previewFileMeta, previewLegacyFiles),
-            import("@excalidraw/excalidraw"),
-          ]);
-          if (cancelled) return null;
-          return exportToSvg({
-            elements: previewElements,
-            appState: { ...document.appState, exportBackground: true, viewBackgroundColor: document.appState?.viewBackgroundColor || "#f5f5f5" },
+        const scheduledRenderJob = scheduleCanvasThumbnailRender(async (signal) => {
+          if (cancelled || signal.aborted) return null;
+          const files = await loadCanvasFiles(document.id, previewFileMeta, previewLegacyFiles);
+          if (cancelled || signal.aborted) return null;
+          const { exportToSvg } = await import("@excalidraw/excalidraw");
+          if (signal.aborted) return null;
+          const svg = await exportToSvg({
+            elements: liveElements,
+            appState: {
+              ...document.appState,
+              exportBackground: true,
+              viewBackgroundColor: previewBackgroundColor,
+            },
             files,
           });
+          if (signal.aborted) return null;
+          const svgMarkup = svg.outerHTML;
+          const rootTag = svgMarkup.match(/^<svg\b[^>]*>/i)?.[0];
+          return rootTag
+            ? `${rootTag.replace(/\s(?:width|height|preserveAspectRatio)=(['"]).*?\1/gi, "").slice(0, -1)} width="100%" height="100%" preserveAspectRatio="none">${svgMarkup.slice(rootTag.length)}`
+            : svgMarkup;
         });
-        if (cancelled || !svg) return;
-        const svgMarkup = svg.outerHTML;
-        const rootTag = svgMarkup.match(/^<svg\b[^>]*>/i)?.[0];
-        const markup = rootTag
-          ? `${rootTag.replace(/\s(?:width|height|preserveAspectRatio)=(['"]).*?\1/gi, "").slice(0, -1)} width="100%" height="100%" preserveAspectRatio="xMidYMid slice">${svgMarkup.slice(rootTag.length)}`
-          : svgMarkup;
+        renderJob = scheduledRenderJob;
+        const markup = await scheduledRenderJob.promise;
+        if (cancelled || !markup) return;
         renderedRefreshSeedRef.current = refreshSeed;
         setPreviewState({ key: cacheKey, markup, revision: desiredRevision });
         void writeCanvasThumbnail(cacheKey, markup, desiredRevision);
@@ -380,8 +530,11 @@ function CanvasCardPreview({ document, refreshSeed }: { document: CanvasDocument
         // Keep the card's skeleton if this canvas cannot be previewed.
       }
     })();
-    return () => { cancelled = true; };
-  }, [cacheKey, cacheReady, desiredRevision, document.appState, document.fileMeta, document.files, document.id, forceRefresh, isNearViewport, liveElements, needsRefresh, previewElements, previewMarkup, refreshSeed]);
+    return () => {
+      cancelled = true;
+      renderJob?.cancel();
+    };
+  }, [cacheKey, cacheReady, desiredRevision, document.appState, document.fileMeta, document.files, document.id, forceRefresh, isNearViewport, liveElements, needsRefresh, previewBackgroundColor, previewMarkup, refreshSeed]);
 
   return <div ref={containerRef} className="canvas-preview">
     {previewMarkup ? <div className="canvas-preview-svg" dangerouslySetInnerHTML={{ __html: previewMarkup }} /> : <div className={`canvas-preview-shimmer ${isNearViewport ? "is-rendering" : ""}`} />}
@@ -466,9 +619,10 @@ export default function CanvasHome() {
       setResources(nextResources);
       void loadCanvasDocuments<CanvasDocument>().then((loadedDocuments) => {
         if (cancelled) return;
-        const documentsWithResources = loadedDocuments.map((document) =>
-          document.resourceId && resourceIds.has(document.resourceId) ? document : { ...document, resourceId: nextResources[0].id },
-        );
+        const documentsWithResources = loadedDocuments.map((document) => {
+          const resourceId = document.resourceId && resourceIds.has(document.resourceId) ? document.resourceId : nextResources[0].id;
+          return resourceId === document.resourceId ? document : { ...document, resourceId };
+        });
         setDocuments(documentsWithResources);
         const validIds = new Set(documentsWithResources.map((document) => document.id));
         const loadedTabs = Array.isArray(workspace.openTabIds) ? workspace.openTabIds.filter((id: string) => validIds.has(id)) : [];
@@ -521,8 +675,8 @@ export default function CanvasHome() {
 
   useEffect(() => {
     if (!ready) return;
-    setSaveStatus("Saving…");
     const timer = window.setTimeout(() => {
+      setSaveStatus("Saving…");
       void saveCanvasDocuments(documents).then(() => setSaveStatus("Saved on this device"))
         .catch(() => setSaveStatus("Could not save locally"));
     }, 500);
@@ -572,7 +726,9 @@ export default function CanvasHome() {
         scrollY: appState.scrollY,
       },
       updatedAt: now,
-      ...(elementsChanged ? { previewUpdatedAt: now } : {}),
+      previewUpdatedAt: elementsChanged || current.appState?.viewBackgroundColor !== appState.viewBackgroundColor
+        ? now
+        : current.previewUpdatedAt ?? current.updatedAt,
     };
     const nextDocuments = documentsRef.current.map((document) => document.id === canvasId ? nextDocument : document);
     documentsRef.current = nextDocuments;
@@ -637,7 +793,9 @@ export default function CanvasHome() {
       const hasChanges = Object.entries(update).some(([key, value]) => document[key as keyof CanvasDocument] !== value);
       if (!hasChanges) return document;
       const now = Date.now();
-      const previewChanged = "elements" in update || "appState" in update || "fileMeta" in update || "files" in update;
+      const previewChanged = "elements" in update || "appState" in update ||
+        ("files" in update && update.files !== undefined) ||
+        ("fileMeta" in update && !("files" in update));
       return { ...document, ...update, updatedAt: now, ...(previewChanged ? { previewUpdatedAt: now } : {}) };
     }));
   }, []);
@@ -843,7 +1001,6 @@ export default function CanvasHome() {
     if (isRefreshingThumbnails) return;
     setIsRefreshingThumbnails(true);
     try {
-      await clearCanvasThumbnailCache();
       setThumbnailRefreshSeed((seed) => seed + 1);
     } finally {
       setIsRefreshingThumbnails(false);
@@ -854,19 +1011,29 @@ export default function CanvasHome() {
     if (!file) return;
     try {
       const parsed = JSON.parse(await file.text());
-      captureCanvasSnapshot(activeId);
-      const document: CanvasDocument = {
+      const document = {
         ...makeCanvas(file.name.replace(/\.excalidraw(?:\.json)?$/i, "") || "Imported canvas"),
         resourceId: selectedResourceId ?? resources[0]?.id,
         elements: Array.isArray(parsed.elements) ? parsed.elements : [],
         appState: { ...parsed.appState, theme: "dark" },
-        files: parsed.files ?? {},
-      };
+        files: {},
+      } satisfies CanvasDocument;
+      const importedFiles = parsed.files && typeof parsed.files === "object" ? parsed.files : {};
+      const fileMeta = await saveCanvasFiles(document.id, importedFiles);
+      document.fileMeta = fileMeta;
+      rememberCanvasFiles(canvasFilesCacheRef.current, document.id, importedFiles);
+      sceneSnapshotsRef.current.set(document.id, {
+        elements: document.elements,
+        files: importedFiles,
+        backgroundColor: document.appState?.viewBackgroundColor,
+        ...readViewport(document.appState),
+      });
+      captureCanvasSnapshot(activeId);
       setDocuments((current) => [document, ...current]);
       setOpenTabIds((current) => [...current, document.id]);
       setActiveId(document.id);
     } catch {
-      await dialogs.alert({ title: "Could not open canvas", message: "That file could not be opened as an Excalidraw canvas." });
+      await dialogs.alert({ title: "Import failed", message: "The canvas could not be imported. Check that the file is a valid Excalidraw file and that local storage has enough space." });
     }
     if (importInputRef.current) importInputRef.current.value = "";
   }, [activeId, captureCanvasSnapshot, dialogs, resources, selectedResourceId]);

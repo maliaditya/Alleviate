@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import { CalendarDays, CalendarPlus, Check, CalendarRange, ChevronDown, ChevronRight, FolderPlus, GitBranch, Inbox, List, Pencil, Plus, Trash2, UserRound, Wrench, X } from "lucide-react";
 import AppSidebar from "../AppSidebar";
 import { useAppDialogs } from "../AppDialogs";
@@ -30,10 +30,34 @@ function occursOn(task: Task, day: string) {
 function scheduleFrequency(task: Task) {
   if (!task.repeat) return "Once";
   const interval = Math.max(1, task.repeat.interval || 1);
-  const frequency = interval === 1 ? "Every day" : `Every ${interval} days`;
   const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const skipped = (task.repeat.skipWeekdays || []).map((day) => weekdays[day]).filter(Boolean);
-  return skipped.length ? `${frequency} · skips ${skipped.join(", ")}` : frequency;
+  const skipped = [...new Set(task.repeat.skipWeekdays || [])].filter((day) => Number.isInteger(day) && day >= 0 && day < 7).sort((a, b) => a - b).map((day) => weekdays[day]);
+  return interval === 1 ? `${7 - skipped.length} days a week` : `Every ${interval} days`;
+}
+function taskTimeRange(task: Task) {
+  if (!task.time) return "All day";
+  const format = (value: string) => {
+    const [hours, minutes] = value.split(":").map(Number);
+    return new Date(2000, 0, 1, hours || 0, minutes || 0).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  };
+  return task.endTime ? `${format(task.time)} – ${format(task.endTime)}` : format(task.time);
+}
+function addMinutesToTime(value: string, minutes: number) {
+  const [hours, mins] = value.split(":").map(Number);
+  const total = ((hours * 60 + mins + minutes) % 1440 + 1440) % 1440;
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+function taskMetadata(task: Task) {
+  const loop = task.feedbackAction?.object?.trim();
+  let note = task.note?.trim() || "";
+  if (loop) {
+    const prefix = `Feedback loop · ${loop}`;
+    if (note.toLocaleLowerCase() === prefix.toLocaleLowerCase()) note = "";
+    else if (note.toLocaleLowerCase().startsWith(prefix.toLocaleLowerCase())) note = note.slice(prefix.length).replace(/^\s*(?:—|·)\s*/, "");
+  }
+  if (task.repeat) note = note.replace(/^(?:\d+\s+days?\s+(?:a week|per week)|\d+\s+days?\/week|every\s+day)(?:\s*[|·—,]\s*|\s+)?/i, "");
+  const skipped = [...new Set(task.repeat?.skipWeekdays || [])].filter((day) => Number.isInteger(day) && day >= 0 && day < 7).sort((a, b) => a - b).map((day) => ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][day]);
+  return [loop, task.repeat && scheduleFrequency(task), skipped.length ? `Skips: ${skipped.join(", ")}` : undefined, task.time && taskTimeRange(task), note || undefined].filter(Boolean) as string[];
 }
 function readObjectHierarchy(objects: string[]): ObjectTopic[] {
   const names = new Set(objects.map((name) => name.trim().toLocaleLowerCase()));
@@ -80,7 +104,15 @@ export default function TaskListPage() {
   const [draft, setDraft] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedAction, setSelectedAction] = useState<{ object: string; action: LinkedAction } | null>(null);
+  const [inlineActionEdit, setInlineActionEdit] = useState<{ object: string; actionId: string } | null>(null);
+  const [inlineActionName, setInlineActionName] = useState("");
+  const inlineActionInputRef = useRef<HTMLInputElement>(null);
   const [factorPickerActionId, setFactorPickerActionId] = useState<string | null>(null);
+  const [factorMenuActionId, setFactorMenuActionId] = useState<string | null>(null);
+  const [addingFactorActionId, setAddingFactorActionId] = useState<string | null>(null);
+  const [newFactorName, setNewFactorName] = useState("");
+  const [newFactorValue, setNewFactorValue] = useState("");
+  const [newFactorTools, setNewFactorTools] = useState("");
   const [showCompleted, setShowCompleted] = useState(false);
   const [objects, setObjects] = useState<string[]>([]);
   const [objectHierarchy, setObjectHierarchy] = useState<ObjectTopic[]>([]);
@@ -94,6 +126,7 @@ export default function TaskListPage() {
   const [scheduleDate, setScheduleDate] = useState(today);
   const [scheduleStart, setScheduleStart] = useState("09:00");
   const [scheduleEnd, setScheduleEnd] = useState("10:00");
+  const [scheduleAllDay, setScheduleAllDay] = useState(false);
   const [scheduleRepeat, setScheduleRepeat] = useState<"none" | "daily" | "custom">("none");
   const [scheduleInterval, setScheduleInterval] = useState(2);
   const [scheduleUntil, setScheduleUntil] = useState("");
@@ -205,6 +238,18 @@ export default function TaskListPage() {
   const remove = (task: Task) => {
     const next = tasks.filter((item) => item.id !== task.id); setTasks(next); saveTasks(next);
   };
+  const removeObjectAction = (object: string, action: LinkedAction) => {
+    const key = object.trim().toLocaleLowerCase();
+    const currentActions = loops[key]?.actions || [];
+    updateObjectLoop(object, { actions: currentActions.filter((item) => item.id !== action.id) });
+    const nextTasks = tasks.filter((task) => !(task.feedbackAction?.object.trim().toLocaleLowerCase() === key && task.feedbackAction.actionId === action.id));
+    if (nextTasks.length !== tasks.length) { setTasks(nextTasks); saveTasks(nextTasks); }
+    if (selectedAction?.object.trim().toLocaleLowerCase() === key && selectedAction.action.id === action.id) setSelectedAction(null);
+    if (factorPickerActionId === action.id) setFactorPickerActionId(null);
+    if (factorMenuActionId === action.id) setFactorMenuActionId(null);
+    if (addingFactorActionId === action.id) setAddingFactorActionId(null);
+    if (inlineActionEdit?.object.trim().toLocaleLowerCase() === key && inlineActionEdit.actionId === action.id) setInlineActionEdit(null);
+  };
   const toggleAction = (object: string, action: LinkedAction) => {
     const key = object.trim().toLocaleLowerCase();
     const complete = !action.complete;
@@ -218,11 +263,32 @@ export default function TaskListPage() {
     setLoops(next);
     try { localStorage.setItem(LOOPS_KEY, JSON.stringify(next)); window.dispatchEvent(new Event("feedback-loops-updated")); } catch { /* Keep the action list usable if storage is unavailable. */ }
   };
+  const addFactorAndAssign = (object: string, actionId: string) => {
+    const factorName = newFactorName.trim();
+    if (!factorName) return;
+    const key = object.trim().toLocaleLowerCase();
+    const current = { ...EMPTY_LOOP, ...loops[key] };
+    const duplicate = current.inputs.find((input) => input.name.trim().toLocaleLowerCase() === factorName.toLocaleLowerCase());
+    const input = duplicate
+      ? { ...duplicate, value: newFactorValue.trim() || duplicate.value, tools: newFactorTools.trim() || duplicate.tools }
+      : { id: crypto.randomUUID(), name: factorName, value: newFactorValue.trim(), tools: newFactorTools.trim() };
+    updateObjectLoop(object, {
+      inputs: duplicate ? current.inputs.map((item) => item.id === duplicate.id ? input : item) : [...current.inputs, input],
+      actions: current.actions.map((action) => action.id === actionId ? { ...action, inputId: input.id } : action),
+    });
+    setNewFactorName("");
+    setNewFactorValue("");
+    setNewFactorTools("");
+    setAddingFactorActionId(null);
+    setFactorMenuActionId(null);
+  };
   const openSchedule = (target: { title: string; note?: string; feedbackAction?: { object: string; actionId: string }; existing?: Task }) => {
     setScheduleTarget({ title: target.title, note: target.note || "", feedbackAction: target.feedbackAction, existingId: target.existing?.id });
     setScheduleDate(target.existing?.date || today);
-    setScheduleStart(target.existing?.time || "09:00");
-    setScheduleEnd(target.existing?.endTime || "10:00");
+    const startTime = target.existing?.time || "09:00";
+    setScheduleAllDay(Boolean(target.existing && !target.existing.time));
+    setScheduleStart(startTime);
+    setScheduleEnd(target.existing?.endTime || addMinutesToTime(startTime, 60));
     setScheduleRepeat(target.existing?.repeat ? (target.existing.repeat.interval === 1 ? "daily" : "custom") : "none");
     setScheduleInterval(target.existing?.repeat?.interval || 2);
     setScheduleUntil(target.existing?.repeat?.until || "");
@@ -234,7 +300,7 @@ export default function TaskListPage() {
     if (!scheduleTarget) return;
     const repeat = scheduleRepeat === "none" ? undefined : { interval: scheduleRepeat === "daily" ? 1 : Math.max(1, Math.min(365, scheduleInterval)), unit: "day" as const, ...(scheduleSkipWeekdays.length ? { skipWeekdays: scheduleSkipWeekdays } : {}), ...(scheduleUntil >= scheduleDate ? { until: scheduleUntil } : {}) };
     const existing = scheduleTarget.existingId ? tasks.find((task) => task.id === scheduleTarget.existingId) : undefined;
-    const scheduled: Task = { id: existing?.id || crypto.randomUUID(), title: scheduleTarget.title, date: scheduleDate, time: scheduleStart, endTime: scheduleEnd, note: scheduleTarget.note, color: existing?.color, repeat, feedbackAction: scheduleTarget.feedbackAction, completedDates: existing?.completedDates || [] };
+    const scheduled: Task = { id: existing?.id || crypto.randomUUID(), title: scheduleTarget.title, date: scheduleDate, time: scheduleAllDay ? undefined : scheduleStart, endTime: scheduleAllDay ? undefined : scheduleEnd, note: scheduleTarget.note, color: existing?.color, repeat, feedbackAction: scheduleTarget.feedbackAction, completedDates: existing?.completedDates || [] };
     const next = existing ? tasks.map((task) => task.id === existing.id ? scheduled : task) : [...tasks, scheduled];
     setTasks(next);
     saveTasks(next);
@@ -246,6 +312,19 @@ export default function TaskListPage() {
     const next = { ...loops, [key]: { ...EMPTY_LOOP, ...loops[key], ...patch } };
     setLoops(next);
     try { localStorage.setItem(LOOPS_KEY, JSON.stringify(next)); window.dispatchEvent(new Event("feedback-loops-updated")); } catch { /* Keep the feedback loop usable if storage is unavailable. */ }
+  };
+  const startInlineActionEdit = (object: string, action: LinkedAction) => {
+    setInlineActionName(action.name || "");
+    setInlineActionEdit({ object, actionId: action.id });
+    requestAnimationFrame(() => { inlineActionInputRef.current?.focus(); inlineActionInputRef.current?.select(); });
+  };
+  const commitInlineActionEdit = () => {
+    if (!inlineActionEdit) return;
+    const key = inlineActionEdit.object.trim().toLocaleLowerCase();
+    const currentActions = loops[key]?.actions || [];
+    const target = currentActions.find((action) => action.id === inlineActionEdit.actionId);
+    if (target) updateObjectLoop(inlineActionEdit.object, { actions: currentActions.map((action) => action.id === inlineActionEdit.actionId ? { ...action, name: inlineActionName.trim() || action.name } : action) });
+    setInlineActionEdit(null);
   };
   const renameHierarchyTopic = async (topic: ObjectTopic) => {
     setHierarchyContextMenu(null);
@@ -414,18 +493,19 @@ export default function TaskListPage() {
                 {objectActions.length ? objectActions.map((action) => {
                   const factor = loops[selectedObject.trim().toLocaleLowerCase()]?.inputs.find((input) => input.id === action.inputId);
                   const linkedSchedule = [...tasks].reverse().find((task) => task.feedbackAction?.object.trim().toLocaleLowerCase() === selectedObject.trim().toLocaleLowerCase() && task.feedbackAction.actionId === action.id);
-                  const actionFrequency = linkedSchedule ? scheduleFrequency(linkedSchedule) : action.details;
-                  return <div className="task-action-item" key={action.id}>
+                  const actionMetadata = linkedSchedule ? taskMetadata(linkedSchedule) : action.details ? [action.details] : [];
+                  return <div className={`task-action-item ${factorPickerActionId === action.id ? "has-factor-picker" : ""}`} key={action.id}>
                     <article onClick={() => setSelectedAction({ object: selectedObject, action })} className={`today-task-row ${action.complete ? "is-complete" : ""} ${selectedAction?.action.id === action.id ? "is-selected" : ""}`}>
                       <button type="button" className="today-task-check" style={taskCheckboxStyle(linkedSchedule?.id)} onClick={(event) => { event.stopPropagation(); toggleAction(selectedObject, action); setSelectedAction({ object: selectedObject, action: { ...action, complete: !action.complete, completedDate: !action.complete ? today : undefined } }); }} aria-label={action.complete ? `Mark ${action.name || action.details} incomplete` : `Mark ${action.name || action.details} complete`}>{action.complete && <Check size={14} />}</button>
-                      <div className="today-task-copy"><strong>{action.name || action.details}</strong><small className="task-action-meta">{actionFrequency && <span>{actionFrequency}</span>}{factor && <span>{factor.name}: {factor.value || "value not set"}</span>}</small></div>
+                      <div className="today-task-copy">{inlineActionEdit?.object.toLocaleLowerCase() === selectedObject.toLocaleLowerCase() && inlineActionEdit.actionId === action.id ? <input ref={inlineActionInputRef} className="task-inline-action-name" aria-label="Task name" value={inlineActionName} onChange={(event) => setInlineActionName(event.target.value)} onBlur={commitInlineActionEdit} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitInlineActionEdit(); } if (event.key === "Escape") setInlineActionEdit(null); }} /> : <strong title="Double-click to edit task name" onDoubleClick={(event) => { event.stopPropagation(); startInlineActionEdit(selectedObject, action); }}>{action.name || action.details}</strong>}<small className="task-action-meta">{actionMetadata.map((detail, index) => <span key={`${detail}-${index}`}>{detail}</span>)}{factor && <span>{factor.name}: {factor.value || "value not set"}</span>}</small></div>
                       <div className="task-row-tools">
                         <button type="button" className="task-row-icon" title="Schedule action" aria-label={`Schedule ${action.name || "action"}`} onClick={(event) => { event.stopPropagation(); openSchedule({ title: action.name || action.details || "Feedback action", note: [selectedObject && `Feedback loop · ${selectedObject}`, action.details].filter(Boolean).join(" — "), feedbackAction: { object: selectedObject, actionId: action.id }, existing: linkedSchedule }); }}><CalendarPlus size={15} /></button>
                         <button type="button" className="task-row-icon" title="Choose the factor this action influences" aria-label={`Choose factor for ${action.name || "action"}`} aria-expanded={factorPickerActionId === action.id} onClick={(event) => { event.stopPropagation(); setFactorPickerActionId((current) => current === action.id ? null : action.id); }}><Wrench size={14} /></button>
+                        <button type="button" className="task-row-icon task-row-delete-icon" title="Delete action" aria-label={`Delete ${action.name || "action"}`} onClick={(event) => { event.stopPropagation(); removeObjectAction(selectedObject, action); }}><Trash2 size={14} /></button>
                       </div>
                       {action.complete && <span className="today-task-time">{action.completedDate || "Completed"}</span>}
                     </article>
-                    {factorPickerActionId === action.id && <div className="task-factor-picker" onClick={(event) => event.stopPropagation()}><label>Influences<select value={action.inputId || ""} onChange={(event) => updateActionFactor(selectedObject, action.id, event.target.value)}><option value="">No factor selected</option>{(loops[selectedObject.trim().toLocaleLowerCase()]?.inputs || []).map((input) => <option key={input.id} value={input.id}>{input.name || "Untitled factor"}</option>)}</select></label><button type="button" onClick={() => setFactorPickerActionId(null)}>Done</button></div>}
+                    {factorPickerActionId === action.id && <div className="task-factor-picker" onClick={(event) => event.stopPropagation()}><label>Influences<div className="task-factor-select-wrap"><button type="button" className="task-factor-select" aria-haspopup="listbox" aria-expanded={factorMenuActionId === action.id} onClick={() => setFactorMenuActionId((current) => current === action.id ? null : action.id)}><span>{(loops[selectedObject.trim().toLocaleLowerCase()]?.inputs || []).find((input) => input.id === action.inputId)?.name || "No influence selected"}</span><ChevronDown size={14} /></button>{factorMenuActionId === action.id && <div className="task-factor-menu" role="listbox" aria-label="Choose influence"><button type="button" role="option" aria-selected={!action.inputId} onClick={() => { updateActionFactor(selectedObject, action.id, ""); setFactorMenuActionId(null); }}>No influence selected</button>{(loops[selectedObject.trim().toLocaleLowerCase()]?.inputs || []).map((input) => <button type="button" role="option" aria-selected={action.inputId === input.id} key={input.id} onClick={() => { updateActionFactor(selectedObject, action.id, input.id); setFactorMenuActionId(null); }}>{input.name || "Untitled influence"}</button>)}<div className="task-factor-menu-divider" />{addingFactorActionId === action.id ? <div className="task-factor-add-form"><input autoFocus value={newFactorName} onChange={(event) => setNewFactorName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addFactorAndAssign(selectedObject, action.id); } if (event.key === "Escape") { setAddingFactorActionId(null); setNewFactorName(""); setNewFactorValue(""); setNewFactorTools(""); } }} placeholder="Factor you can change" aria-label="Factor you can change" /><input value={newFactorValue} onChange={(event) => setNewFactorValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addFactorAndAssign(selectedObject, action.id); } }} placeholder="Current value" aria-label="Current value" /><input value={newFactorTools} onChange={(event) => setNewFactorTools(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addFactorAndAssign(selectedObject, action.id); } }} placeholder="What could help?" aria-label="What could help?" /><button type="button" disabled={!newFactorName.trim()} onClick={() => addFactorAndAssign(selectedObject, action.id)}>Add & assign</button></div> : <button type="button" className="task-factor-add-trigger" onClick={() => { setNewFactorName(""); setNewFactorValue(""); setNewFactorTools(""); setAddingFactorActionId(action.id); }}>＋ Add new influence</button>}</div>}</div></label><button type="button" onClick={() => { setFactorPickerActionId(null); setFactorMenuActionId(null); setAddingFactorActionId(null); }}>Done</button></div>}
                   </div>;
                 }) : <p className="tasks-detail-empty">No linked actions for this object.</p>}
               </div>
@@ -434,7 +514,7 @@ export default function TaskListPage() {
                 {visible.length ? visible.map((task) => (
                   <article key={task.id} onClick={() => { setSelectedId(task.id); setSelectedObject(null); setSelectedAction(null); }} className={`today-task-row ${task.completedDates?.includes(today) ? "is-complete" : ""} ${selected?.id === task.id && !selectedAction ? "is-selected" : ""}`}>
                     <button type="button" className="today-task-check" style={taskCheckboxStyle(task.id)} onClick={(event) => { event.stopPropagation(); toggle(task); }} aria-label={`Toggle ${task.title}`}>{task.completedDates?.includes(today) && <Check size={14} />}</button>
-                    <div className="today-task-copy"><strong>{task.title}</strong>{task.note && <small>{task.note}</small>}</div>
+                    <div className="today-task-copy"><strong>{task.title}</strong><small className="task-action-meta">{taskMetadata(task).map((detail, index) => <span key={`${detail}-${index}`}>{detail}</span>)}</small></div>
                     <span className="today-task-time">{task.date}</span>
                     <div className="task-row-tools"><button type="button" className="task-row-icon" title="Schedule task" aria-label={`Schedule ${task.title}`} onClick={(event) => { event.stopPropagation(); openSchedule({ title: task.title, note: task.note, existing: task }); }}><CalendarPlus size={15} /></button><button type="button" className="today-task-delete" onClick={(event) => { event.stopPropagation(); remove(task); }} aria-label={`Delete ${task.title}`}><Trash2 size={14} /></button></div>
                   </article>
@@ -461,19 +541,19 @@ export default function TaskListPage() {
           ) : <p className="tasks-detail-empty">Select a task to see its details.</p>}
         </aside>
       </div>
-      {scheduleTarget && <div className="calendar-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setScheduleTarget(null); }}><form className="calendar-event-modal" onSubmit={saveSchedule}>
+      {scheduleTarget && <div className="calendar-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setScheduleTarget(null); }}><form className="calendar-event-modal task-schedule-modal" onSubmit={saveSchedule}>
         <header><div><span>{scheduleTarget.feedbackAction ? `FEEDBACK ACTION · ${scheduleTarget.feedbackAction.object}` : "TASK SCHEDULE"}</span><h2>Schedule task</h2></div><button type="button" className="icon-btn" aria-label="Close schedule" onClick={() => setScheduleTarget(null)}><X size={17} /></button></header>
         <label>Title<input required maxLength={100} value={scheduleTarget.title} onChange={(event) => setScheduleTarget((current) => current ? { ...current, title: event.target.value } : current)} /></label>
-        <div className="calendar-modal-row calendar-modal-date-row"><label>Date<input type="date" value={scheduleDate} onChange={(event) => setScheduleDate(event.target.value)} required /></label><label>Start<input type="time" value={scheduleStart} onChange={(event) => setScheduleStart(event.target.value)} /></label><label>End<input type="time" value={scheduleEnd} onChange={(event) => setScheduleEnd(event.target.value)} /></label></div>
+        <div className="calendar-modal-row calendar-modal-date-row"> <label>Date<input type="date" value={scheduleDate} onChange={(event) => setScheduleDate(event.target.value)} required /></label>{!scheduleAllDay && <><label>Start<input type="time" value={scheduleStart} onChange={(event) => { const nextStart = event.target.value; setScheduleStart(nextStart); if (nextStart) setScheduleEnd(addMinutesToTime(nextStart, 60)); }} /></label><label>End<input type="time" value={scheduleEnd} onChange={(event) => setScheduleEnd(event.target.value)} /></label></>}</div>
         <label>Note<input maxLength={240} value={scheduleTarget.note} onChange={(event) => setScheduleTarget((current) => current ? { ...current, note: event.target.value } : current)} placeholder="Optional details" /></label>
         <fieldset className="calendar-repeat-fieldset"><legend>Repeat</legend>
           <div className="calendar-modal-row calendar-repeat-frequency-row"><label>Frequency<select value={scheduleRepeat} onChange={(event) => { setScheduleRepeat(event.target.value as typeof scheduleRepeat); if (event.target.value === "none") setScheduleExceptOpen(false); }}><option value="none">Does not repeat</option><option value="daily">Every day</option><option value="custom">Custom interval</option></select></label>
             {scheduleRepeat === "custom" && <label>Repeat every<input type="number" min={1} max={365} value={scheduleInterval} onChange={(event) => setScheduleInterval(Number(event.target.value) || 1)} /></label>}
-            {scheduleRepeat !== "none" && <div className="calendar-except-wrap"><span>Except</span><button type="button" className="calendar-except-trigger" aria-expanded={scheduleExceptOpen} onClick={() => setScheduleExceptOpen((open) => !open)}>{scheduleSkipWeekdays.length ? `${scheduleSkipWeekdays.length} days` : "Weekdays"}<ChevronDown size={13}/></button>{scheduleExceptOpen && <div className="calendar-except-menu" role="group" aria-label="Skip weekdays">{[[1,"Monday"],[2,"Tuesday"],[3,"Wednesday"],[4,"Thursday"],[5,"Friday"],[6,"Saturday"],[0,"Sunday"]].map(([day, label]) => <label key={day}><input type="checkbox" checked={scheduleSkipWeekdays.includes(Number(day))} onChange={() => setScheduleSkipWeekdays((current) => current.includes(Number(day)) ? current.filter((item) => item !== Number(day)) : [...current, Number(day)])}/>{label}</label>)}</div>}</div>}
+            {scheduleRepeat !== "none" && <div className="calendar-except-wrap"><span>Except</span><button type="button" className="calendar-except-trigger" aria-expanded={scheduleExceptOpen} onClick={() => setScheduleExceptOpen((open) => !open)}>{scheduleSkipWeekdays.length ? `${scheduleSkipWeekdays.length} days` : "Weekdays"}<ChevronDown size={13}/></button>{scheduleExceptOpen && <div className="calendar-except-menu" role="group" aria-label="Skip weekdays"><strong className="calendar-except-menu-title">Skip days</strong><div className="calendar-except-days">{[[1,"Monday"],[2,"Tuesday"],[3,"Wednesday"],[4,"Thursday"],[5,"Friday"],[6,"Saturday"],[0,"Sunday"]].map(([day, label]) => <label key={day}><input type="checkbox" checked={scheduleSkipWeekdays.includes(Number(day))} onChange={() => setScheduleSkipWeekdays((current) => current.includes(Number(day)) ? current.filter((item) => item !== Number(day)) : [...current, Number(day)])}/>{label}</label>)}</div></div>}</div>}
           </div>
           {scheduleRepeat !== "none" && <div className="calendar-modal-row calendar-repeat-end"><label>Until (optional)<input type="date" min={scheduleDate} value={scheduleUntil} onChange={(event) => setScheduleUntil(event.target.value)} /></label></div>}
         </fieldset>
-        <footer><button type="button" className="calendar-today-btn" onClick={() => setScheduleTarget(null)}>Cancel</button><button className="primary-btn" type="submit"><CalendarPlus size={15} /> Save schedule</button></footer>
+        <footer><label className="calendar-all-day-toggle"><input type="checkbox" checked={scheduleAllDay} onChange={(event) => setScheduleAllDay(event.target.checked)} />All day</label><div className="calendar-modal-footer-actions"><button type="button" className="calendar-today-btn" onClick={() => setScheduleTarget(null)}>Cancel</button><button className="primary-btn" type="submit"><CalendarPlus size={15} /> Save schedule</button></div></footer>
       </form></div>}
     </main>
   );

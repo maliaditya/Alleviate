@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
-import { ArrowRight, BarChart3, CalendarPlus, Check, ChevronLeft, ChevronRight, Plus, Repeat2, Target, Trash2, Wrench } from "lucide-react";
+import { ArrowRight, BarChart3, CalendarPlus, Check, ChevronLeft, ChevronRight, Pencil, Plus, Repeat2, Target, Trash2, Wrench } from "lucide-react";
 
 type Cadence = "day" | "week" | "month";
 type Reading = { id: string; date: string; value: number; note?: string; inputValues?: Record<string, string> };
@@ -42,12 +42,15 @@ export default function FeedbackLoopCard({ name, loop, onUpdate, compact = false
   const [reviewNewFactorName, setReviewNewFactorName] = useState("");
   const [reviewValue, setReviewValue] = useState("");
   const [reviewExpectation, setReviewExpectation] = useState("");
-  const [activeTab, setActiveTab] = useState<"log" | "review" | "setup" | "history" | "experiments">(() => compact ? "setup" : loop.objective ? "log" : "setup");
+  const [activeTab, setActiveTab] = useState<"overview" | "log" | "review" | "setup" | "history" | "experiments">(() => compact ? "setup" : loop.objective ? "log" : "setup");
   const [experimentRowsPerPage, setExperimentRowsPerPage] = useState(5);
   const [experimentPage, setExperimentPage] = useState(1);
   const [historyRowsPerPage, setHistoryRowsPerPage] = useState(5);
   const [historyPage, setHistoryPage] = useState(1);
   const [compactEditing, setCompactEditing] = useState<"outcome" | "factors" | "actions" | null>(null);
+  const [editingActionId, setEditingActionId] = useState<string | null>(null);
+  const [actionNameDraft, setActionNameDraft] = useState("");
+  const actionNameInputRef = useRef<HTMLInputElement>(null);
   const isMaintenance = loop.objectiveType === "maintain";
   const orderedReadings = [...(loop.readings || [])].sort((left, right) => left.date.localeCompare(right.date));
   const historyEntries = orderedReadings.slice().reverse();
@@ -100,7 +103,6 @@ export default function FeedbackLoopCard({ name, loop, onUpdate, compact = false
     const inputValues = Object.fromEntries(loop.inputs.map((input) => [input.id, logInputValues[input.id] ?? input.value]));
     onUpdate({
       readings: [...(loop.readings || []), { id: crypto.randomUUID(), date: logDate, value: Number(logValue), note: logNote.trim() || undefined, inputValues }],
-      inputs: loop.inputs.map((input) => ({ ...input, value: inputValues[input.id] ?? input.value })),
     });
     setLogValue(""); setLogNote("");
   };
@@ -145,13 +147,38 @@ export default function FeedbackLoopCard({ name, loop, onUpdate, compact = false
   const addAction = () => onUpdate({ actions: [...(loop.actions || []), { id: crypto.randomUUID(), name: "", details: "", inputId: "", complete: false }] });
   const updateAction = (id: string, patch: Partial<LoopAction>) => onUpdate({ actions: (loop.actions || []).map((action) => action.id === id ? { ...action, ...patch } : action) });
   const removeAction = (id: string) => onUpdate({ actions: (loop.actions || []).filter((action) => action.id !== id) });
+  const startActionNameEdit = (action: LoopAction) => {
+    setActionNameDraft(action.name);
+    setEditingActionId(action.id);
+    requestAnimationFrame(() => actionNameInputRef.current?.focus());
+  };
+  const commitActionNameEdit = () => {
+    if (!editingActionId) return;
+    const action = loop.actions.find((item) => item.id === editingActionId);
+    if (action) updateAction(editingActionId, { name: actionNameDraft.trim() || action.name });
+    setEditingActionId(null);
+  };
 
   return (
     <article className="feedback-card">
       <header className="feedback-card-heading"><span className="feedback-object-icon"><Repeat2 size={19} /></span><div><small>OBJECT</small><h2>{name}</h2></div><span className={`feedback-status ${isMaintenance && loop.actions.length > 0 && completedMaintenanceTasks === loop.actions.length ? "is-complete" : !isMaintenance && targetReached ? "is-complete" : ""}`}>{cardStatus}</span></header>
       <div className="feedback-tabs" role="tablist" aria-label={`${name} feedback loop`}>
-        {(isMaintenance ? ["setup", "log", "review"] as const : ["setup", "log", "review", "experiments", "history"] as const).map((tab) => <button key={tab} type="button" role="tab" aria-selected={activeTab === tab} className={activeTab === tab ? "is-active" : ""} onClick={() => setActiveTab(tab)}>{tab === "setup" ? "Plan" : tab === "log" ? isMaintenance ? "Tasks" : "Record" : tab === "review" ? isMaintenance ? "Status" : "Learn" : tab === "experiments" ? "Experiments" : "History"}</button>)}
+        {(isMaintenance ? ["overview", "setup", "log", "review"] as const : ["overview", "setup", "log", "review", "experiments", "history"] as const).map((tab) => <button key={tab} type="button" role="tab" aria-selected={activeTab === tab} className={activeTab === tab ? "is-active" : ""} onClick={() => setActiveTab(tab)}>{tab === "overview" ? "Overview" : tab === "setup" ? "Plan" : tab === "log" ? isMaintenance ? "Tasks" : "Record" : tab === "review" ? isMaintenance ? "Status" : "Learn" : tab === "experiments" ? "Experiments" : "History"}</button>)}
       </div>
+
+      {activeTab === "overview" && <section className="feedback-tab-panel feedback-overview" role="tabpanel" aria-label="Influences and actions overview">
+        <div className="feedback-overview-outcome"><div className="feedback-overview-outcome-heading"><span>OUTCOME</span><button type="button" className="feedback-overview-edit" aria-label="Edit outcome" title="Edit outcome" onClick={() => { setCompactEditing("outcome"); setActiveTab("setup"); }}><Pencil size={14} /></button></div><strong>{loop.objective || "No outcome set yet"}</strong></div>
+        <div className="feedback-overview-table-wrap"><table className="feedback-overview-table"><thead><tr><th scope="col">Influence</th><th scope="col">Actions</th></tr></thead><tbody>
+          {isMaintenance ? <tr><th scope="row">Maintenance</th><td>{loop.actions.length ? <ul>{loop.actions.map((action) => <li key={action.id}><strong>{action.name || "Untitled action"}</strong>{action.details && <span>{action.details}</span>}</li>)}</ul> : <span className="feedback-overview-empty">No actions added yet.</span>}</td></tr> : <>
+            {loop.inputs.map((input) => {
+              const linkedActions = loop.actions.filter((action) => action.inputId === input.id);
+              return <tr key={input.id}><th scope="row"><strong>{input.name || "Untitled influence"}</strong>{input.value && <span className="feedback-overview-influence-value">{input.value}</span>}{input.tools && <small>{input.tools}</small>}</th><td>{linkedActions.length ? <ul>{linkedActions.map((action) => <li key={action.id}><strong>{action.name || "Untitled action"}</strong>{action.details && <span>{action.details}</span>}</li>)}</ul> : <span className="feedback-overview-empty">No actions linked.</span>}</td></tr>;
+            })}
+            {loop.actions.some((action) => !action.inputId || !loop.inputs.some((input) => input.id === action.inputId)) && <tr><th scope="row">No influence selected</th><td><ul>{loop.actions.filter((action) => !action.inputId || !loop.inputs.some((input) => input.id === action.inputId)).map((action) => <li key={action.id}><strong>{action.name || "Untitled action"}</strong>{action.details && <span>{action.details}</span>}</li>)}</ul></td></tr>}
+            {!loop.inputs.length && !loop.actions.length && <tr><td colSpan={2} className="feedback-overview-empty">Add an influence and actions in Plan to see them here.</td></tr>}
+          </>}
+        </tbody></table></div>
+      </section>}
 
       {activeTab === "setup" && <section className="feedback-tab-panel" role="tabpanel">
         {!compact && <><p className="feedback-panel-intro">Choose the kind of task first. The plan will only ask for details that fit that task.</p>
@@ -184,7 +211,7 @@ export default function FeedbackLoopCard({ name, loop, onUpdate, compact = false
         </section>}
         <section className="feedback-setup-section">
           <header><div><span className="feedback-step-number">{isMaintenance ? "2" : "3"}</span><h3>{compact ? isMaintenance ? "Maintenance tasks" : "Actions" : isMaintenance ? "Plan the maintenance tasks" : "Pick actions to change a factor"}</h3><p>{compact ? loop.actions.length ? `${loop.actions.length} ${loop.actions.length === 1 ? "task" : "tasks"} planned` : "No actions added yet" : isMaintenance ? "Add each upkeep task, then schedule it on your calendar and choose how often it repeats." : "Each action should connect to one factor. Actions influence factors; factors may influence the outcome."}</p></div>{compact ? <div className="feedback-compact-actions"><button className="secondary-btn" type="button" onClick={() => setCompactEditing(compactEditing === "actions" ? null : "actions")}>{compactEditing === "actions" ? "Done" : "Edit"}</button>{compactEditing === "actions" && <button className="secondary-btn" type="button" onClick={addAction}><Plus size={14} /> Add</button>}</div> : <button className="secondary-btn" type="button" onClick={addAction}><Plus size={14} /> Add a task</button>}</header>
-          {compact && compactEditing !== "actions" && <div className="feedback-compact-summary feedback-compact-grid feedback-compact-action-grid">{loop.actions.map((action) => { const factor = loop.inputs.find((input) => input.id === action.inputId); return <div className={`feedback-compact-item ${action.complete ? "is-complete" : ""}`} key={action.id}><strong>{action.name || "Untitled action"}</strong>{action.details && <span>{action.details}</span>}{factor && <small>Changes {factor.name || "factor"}</small>}</div>; })}</div>}
+          {compact && compactEditing !== "actions" && <div className="feedback-compact-summary feedback-compact-grid feedback-compact-action-grid">{loop.actions.map((action) => { const factor = loop.inputs.find((input) => input.id === action.inputId); return <div className={`feedback-compact-item ${action.complete ? "is-complete" : ""}`} key={action.id}><div className="feedback-compact-action-heading">{editingActionId === action.id ? <input ref={actionNameInputRef} className="feedback-inline-action-name" aria-label="Task name" value={actionNameDraft} onChange={(event) => setActionNameDraft(event.target.value)} onBlur={commitActionNameEdit} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitActionNameEdit(); } if (event.key === "Escape") { setEditingActionId(null); } }} /> : <strong onDoubleClick={() => startActionNameEdit(action)} title="Double-click to edit task name">{action.name || "Untitled action"}</strong>}<div className="feedback-compact-action-tools"><button type="button" aria-label={`Edit ${action.name || "action"}`} title="Edit task details" onClick={() => setCompactEditing("actions")}><Pencil size={13} /></button><button type="button" aria-label={`Delete ${action.name || "action"}`} title="Delete task" onClick={() => removeAction(action.id)}><Trash2 size={13} /></button></div></div>{action.details && <span>{action.details}</span>}{factor && <small>Changes {factor.name || "factor"}</small>}</div>; })}</div>}
           {(!compact || compactEditing === "actions") && (loop.actions.length ? <div className="feedback-setup-list">{loop.actions.map((action) => <div className={`feedback-action-row ${isMaintenance ? "is-maintenance-action" : "is-planned-action"}`} key={action.id}>
             <label className="feedback-field"><span>{isMaintenance ? "Maintenance task" : "What will you do?"}</span><input className={action.complete ? "is-complete" : ""} value={action.name} onChange={(event) => updateAction(action.id, { name: event.target.value })} placeholder={isMaintenance ? "e.g. Check tyre pressure" : "e.g. Go to the gym"} /></label>
             {isMaintenance && <label className="feedback-field"><span>When or how often?</span><input value={action.details} onChange={(event) => updateAction(action.id, { details: event.target.value })} placeholder="e.g. Every 6 months or 10,000 km" /></label>}
@@ -201,7 +228,7 @@ export default function FeedbackLoopCard({ name, loop, onUpdate, compact = false
           <div className="feedback-maintenance-summary"><strong>{completedMaintenanceTasks}<span> / {loop.actions.length}</span></strong><div><b>tasks complete</b><small>{loop.actions.length ? `Your check-in reminder is ${loop.cadence === "day" ? "daily" : loop.cadence === "month" ? "monthly" : "weekly"}.` : "Add upkeep tasks in Plan to get started."}</small></div></div>
           {loop.actions.length ? <ul className="feedback-maintenance-list">{loop.actions.map((action) => <li key={action.id} className={action.complete ? "is-complete" : ""}><label><input type="checkbox" checked={action.complete} onChange={(event) => updateAction(action.id, { complete: event.target.checked, completedDate: event.target.checked ? localDateKey() : undefined })} /><span className="feedback-maintenance-checkmark"><Check size={15} /></span><span className="feedback-maintenance-copy"><strong>{action.name || "Unnamed maintenance task"}</strong><small>{action.details || "No schedule details yet"}</small></span></label><Link className="feedback-schedule-action" href={scheduleActionUrl(name, action)} title={`Schedule ${action.name || "task"}`} aria-label={`Schedule ${action.name || "task"}`}><CalendarPlus size={14} /><span>Schedule</span></Link>{action.complete && <time>{action.completedDate || "Done"}</time>}</li>)}</ul> : <p className="feedback-setup-empty">Go to Plan and add the maintenance tasks you want to keep track of.</p>}
         </> : <>
-        <div className="feedback-tab-intro"><h3>Record your outcome</h3><p>Log the result you are tracking. At the same time, note your current factors so you can compare what changed.</p></div>
+        <div className="feedback-tab-intro"><h3>Record outcome</h3><p>Save an outcome and its factor values for this check-in.</p></div>
         <section className="feedback-progress-panel" aria-label={`${name} progress`}>
           <div className="feedback-progress-heading"><span><BarChart3 size={15} /> Outcome · {loop.metric || "Progress"}{loop.unit ? ` (${loop.unit})` : ""}</span><strong>{currentValue === undefined ? "No result yet" : `${currentValue}${loop.unit ? ` ${loop.unit}` : ""}`}</strong></div>
           {progress !== null ? <div className="feedback-progress-track"><span style={{ width: `${progress}%` }} /></div> : <div className="feedback-progress-track is-empty" />}
@@ -211,8 +238,8 @@ export default function FeedbackLoopCard({ name, loop, onUpdate, compact = false
           <label className="feedback-field"><span>Date checked</span><input type="date" value={logDate} onChange={(event) => setLogDate(event.target.value)} required /></label>
           <label className="feedback-field"><span>Outcome value · {loop.metric || "Result"}{loop.unit ? ` (${loop.unit})` : ""}</span><input type="number" step="any" value={logValue} onChange={(event) => setLogValue(event.target.value)} placeholder={loop.baseline ? `Starting value: ${loop.baseline}` : "Enter the result"} required /></label>
           <label className="feedback-field feedback-note-field"><span>Anything worth noting?</span><input value={logNote} onChange={(event) => setLogNote(event.target.value)} placeholder="Optional context for this result" /></label>
+          {loop.inputs.length > 0 && <div className="feedback-log-inputs"><div><strong>Factors</strong><span>Saved with this check-in only.</span></div>{loop.inputs.map((input) => <label className="feedback-field" key={input.id}><span>{input.name || "Factor"}</span><input value={logInputValues[input.id] ?? input.value} onChange={(event) => setLogInputValues((values) => ({ ...values, [input.id]: event.target.value }))} placeholder="Value" /></label>)}</div>}
           <button className="primary-btn" type="submit">Save outcome <ArrowRight size={15} /></button>
-          {loop.inputs.length > 0 && <div className="feedback-log-inputs"><div><strong>Factors you can influence</strong><span>Record each factor's value today. This helps you see what changed alongside the outcome.</span></div>{loop.inputs.map((input) => <label className="feedback-field" key={input.id}><span>{input.name || "Factor"}{input.tools ? ` · ${input.tools}` : ""}</span><input value={logInputValues[input.id] ?? input.value} onChange={(event) => setLogInputValues((values) => ({ ...values, [input.id]: event.target.value }))} placeholder="Value today" /></label>)}</div>}
         </form>
         </>}
       </section>}
@@ -288,24 +315,26 @@ export default function FeedbackLoopCard({ name, loop, onUpdate, compact = false
           <div className="feedback-maintenance-summary"><strong>{completedMaintenanceTasks}<span> / {loop.actions.length}</span></strong><div><b>upkeep tasks complete</b><small>Check this list {loop.cadence === "day" ? "every day" : loop.cadence === "month" ? "every month" : "every week"}.</small></div></div>
           {loop.actions.length > 0 && <section className="feedback-version-history"><h3>Maintenance tasks</h3><ol>{loop.actions.map((action) => <li key={action.id}><span className={`feedback-version-number ${action.complete ? "is-done" : ""}`}>{action.complete ? <Check size={13} /> : "Next"}</span><div><strong>{action.name || "Unnamed task"}</strong><time>{action.complete ? action.completedDate || "Completed" : action.details || "Not completed yet"}</time></div></li>)}</ol></section>}
         </> : <>
-        <div className="feedback-tab-intro"><h3>Learn from what happened</h3><p>Compare your outcome with the factors you tracked. A pattern is a useful clue, but it does not prove one factor caused the change.</p></div>
-        <div className="feedback-review-status"><span className={targetReached ? "is-complete" : ""}>{outcomeStatus}</span><p>{targetReached ? "Your latest outcome reached the goal you set." : movingAwayFromTarget ? "Your latest outcome moved away from the goal. Look at what changed and choose one small adjustment to try." : movingTowardTarget ? "Your outcome is moving toward the goal. Keep recording the same factors to see whether the pattern continues." : latest ? "Your outcome is at the starting point. Try changing one factor and watch what happens." : "Start by recording an outcome. After two or more records, you can compare what changed."}</p></div>
-        <div className="feedback-review-summary"><div><small>OUTCOME YOU WANT</small><strong>{loop.objective || "Add an outcome in Plan"}</strong><small>Measured as {loop.metric || "your result"}{loop.unit ? ` (${loop.unit})` : ""}</small></div><div><small>MOST RECENT OUTCOME</small><strong>{latest ? `${latest.value}${loop.unit ? ` ${loop.unit}` : ""} · ${latest.date}` : "No outcome recorded yet"}</strong><small>{latest && chartReadings.length > 1 ? `${chartReadings.length} records so far` : `Starting value: ${loop.baseline || "not set"}`}</small></div><div><small>GOAL</small><strong>{loop.target ? `${loop.target}${loop.unit ? ` ${loop.unit}` : ""}` : "Add a goal in Plan"}</strong><small>{progress === null ? "Progress appears after setting a start and goal" : `${Math.round(progress)}% of the way from start to goal`}</small></div></div>
-        {outcomeChange !== undefined && <div className="feedback-cause-comparison"><strong>Since your previous record</strong><span>Outcome changed by <b>{outcomeChange > 0 ? "+" : ""}{outcomeChange}{loop.unit ? ` ${loop.unit}` : ""}</b></span>{changedFactors.length ? <span>Factors that changed: {changedFactors.map((factor) => `${factor.name} (${factor.before} → ${factor.after})`).join(" · ")}</span> : <span>No tracked factor changed, or factor values were not recorded both times.</span>}</div>}
-        {latest?.note && <p className="feedback-latest-note">Your note: {latest.note}</p>}
+        <div className="feedback-tab-intro"><h3>Learn</h3><p>Review your results and choose what to try next.</p></div>
+        <div className="feedback-learn-summary-card">
+        <div className="feedback-review-status"><span className={targetReached ? "is-complete" : ""}>{outcomeStatus}</span><p>{targetReached ? "You reached your goal." : movingAwayFromTarget ? "Consider one small adjustment." : movingTowardTarget ? "Keep tracking to see if this continues." : latest ? "Try one change and track the result." : "Record outcomes to see progress."}</p></div>
+        <div className="feedback-review-summary"><div><small>OUTCOME</small><strong>{loop.objective || "Add an outcome in Plan"}</strong><small>{loop.metric || "Result"}{loop.unit ? ` · ${loop.unit}` : ""}</small></div><div><small>LATEST</small><strong>{latest ? `${latest.value}${loop.unit ? ` ${loop.unit}` : ""} · ${latest.date}` : "No result yet"}</strong><small>{latest && chartReadings.length > 1 ? `${chartReadings.length} records` : `Start: ${loop.baseline || "not set"}`}</small></div><div><small>GOAL</small><strong>{loop.target ? `${loop.target}${loop.unit ? ` ${loop.unit}` : ""}` : "Not set"}</strong><small>{progress === null ? "Set a start and goal" : `${Math.round(progress)}% progress`}</small></div></div>
+        {outcomeChange !== undefined && <div className="feedback-cause-comparison"><strong>Since last check-in</strong><span>Outcome: <b>{outcomeChange > 0 ? "+" : ""}{outcomeChange}{loop.unit ? ` ${loop.unit}` : ""}</b></span>{changedFactors.length ? <span>Changed: {changedFactors.map((factor) => `${factor.name} (${factor.before} → ${factor.after})`).join(" · ")}</span> : <span>No factor change recorded.</span>}</div>}
+        {latest?.note && <p className="feedback-latest-note">Note: {latest.note}</p>}
+        </div>
         <div className="feedback-review-fields">
-          <label className="feedback-field"><span>What do you think may have helped?</span><textarea value={loop.reviewLearning} onChange={(event) => onUpdate({ reviewLearning: event.target.value })} placeholder="Note what you noticed, even if you are not sure yet." rows={3} /></label>
-          <label className="feedback-field"><span>What small change will you try next?</span><textarea value={loop.nextAdjustment} onChange={(event) => onUpdate({ nextAdjustment: event.target.value })} placeholder="Choose one factor or action to adjust." rows={3} /></label>
+          <label className="feedback-field"><span>What helped?</span><textarea value={loop.reviewLearning} onChange={(event) => onUpdate({ reviewLearning: event.target.value })} placeholder="Your observations" rows={3} /></label>
+          <label className="feedback-field"><span>What will you change?</span><textarea value={loop.nextAdjustment} onChange={(event) => onUpdate({ nextAdjustment: event.target.value })} placeholder="One small next step" rows={3} /></label>
         </div>
 
         <section className="feedback-version-section">
-          <header><div><h3>Plan one small experiment</h3><p>Update one factor, then record the outcome you expect.</p></div></header>
+          <header><div><h3>Try one change</h3><p>Choose a factor and note what you expect.</p></div></header>
           <div className="feedback-version-form">
-            <label className="feedback-field"><span>Which factor will you change?</span><select value={reviewInputId} onChange={(event) => { const id = event.target.value; setReviewInputId(id); setReviewValue(loop.inputs.find((input) => input.id === id)?.value || ""); }}><option value="">Choose a factor</option>{loop.inputs.map((input) => <option key={input.id} value={input.id}>{input.name || "Untitled factor"} (now: {input.value || "not set"})</option>)}<option value="__new__">＋ New factor</option></select></label>
+            <label className="feedback-field"><span>Factor you can change</span><select value={reviewInputId} onChange={(event) => { const id = event.target.value; setReviewInputId(id); setReviewValue(loop.inputs.find((input) => input.id === id)?.value || ""); }}><option value="">Choose a factor</option>{loop.inputs.map((input) => <option key={input.id} value={input.id}>{input.name || "Untitled factor"}</option>)}<option value="__new__">＋ New factor</option></select></label>
             {reviewInputId === "__new__" && <label className="feedback-field"><span>New factor name</span><input value={reviewNewFactorName} onChange={(event) => setReviewNewFactorName(event.target.value)} placeholder="e.g. Sleep hours" /></label>}
-            <label className="feedback-field"><span>What will you change it to?</span><input value={reviewValue} onChange={(event) => setReviewValue(event.target.value)} placeholder="New factor value" /></label>
-            <label className="feedback-field"><span>What outcome do you expect?</span><input value={reviewExpectation} onChange={(event) => setReviewExpectation(event.target.value)} placeholder="Your best guess" /></label>
-            <button className="primary-btn" type="button" onClick={startReviewCycle} disabled={reviewInputId === "__new__" ? !reviewNewFactorName.trim() || !reviewValue.trim() : !currentReviewInput || !reviewValue.trim()}>Save experiment <ArrowRight size={15} /></button>
+            <label className="feedback-field"><span>New value</span><input value={reviewValue} onChange={(event) => setReviewValue(event.target.value)} placeholder="Value to try" /></label>
+            <label className="feedback-field"><span>Expected result</span><input value={reviewExpectation} onChange={(event) => setReviewExpectation(event.target.value)} placeholder="Your prediction" /></label>
+            <button className="primary-btn" type="button" onClick={startReviewCycle} disabled={reviewInputId === "__new__" ? !reviewNewFactorName.trim() || !reviewValue.trim() : !currentReviewInput || !reviewValue.trim()}>Save change <ArrowRight size={15} /></button>
           </div>
         </section>
         </>}

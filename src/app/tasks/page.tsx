@@ -34,6 +34,18 @@ function readTasks(): CalendarTask[] {
     return Array.isArray(stored) ? stored.filter((task) => task && typeof task.id === "string" && typeof task.title === "string" && typeof task.date === "string") : [];
   } catch { return []; }
 }
+function taskSchedule(event: CalendarTask) {
+  if (!event.repeat) return "Once";
+  const interval = Math.max(1, event.repeat.interval || 1);
+  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const skipped = [...new Set(event.repeat.skipWeekdays || [])].filter((day) => Number.isInteger(day) && day >= 0 && day < 7).sort((a, b) => a - b).map((day) => weekdays[day]);
+  const frequency = interval === 1 ? `${7 - skipped.length} days/week` : `Every ${interval} days`;
+  return `${frequency}${skipped.length ? ` | Skips: ${skipped.join(",")}` : ""}${event.repeat.until ? ` · Until ${event.repeat.until}` : ""}`;
+}
+function taskTimeRange(event: CalendarTask) {
+  const start = formatTime(event.time);
+  return event.time && event.endTime ? `${start} – ${formatTime(event.endTime)}` : start;
+}
 function readObjects(): string[] {
   try {
     const saved = localStorage.getItem(RESOURCES_OBJECTS_KEY) ?? localStorage.getItem(LEGACY_OBJECTS_KEY);
@@ -179,9 +191,8 @@ function TaskRow({ event, today, onToggle, onDelete, selected, onSelect }: { eve
   const isComplete = event.completedDates?.includes(today) || false;
   return <article onClick={onSelect} className={`today-task-row ${isComplete ? "is-complete" : ""} ${selected ? "is-selected" : ""}`}>
     <button type="button" className="today-task-check" onClick={() => onToggle(event)} aria-label={isComplete ? `Mark ${event.title} incomplete` : `Mark ${event.title} complete`}>{isComplete && <Check size={14} />}</button>
-    <div className="today-task-copy"><strong>{event.title}</strong>{event.note && <small>{event.note}</small>}</div>
-    <span className="today-task-time"><Clock3 size={13} />{formatTime(event.time)}{event.endTime && event.time ? ` – ${formatTime(event.endTime)}` : ""}</span>
-    {event.repeat && <span className="today-task-repeat" title="Repeating event"><Repeat2 size={13} /></span>}
+    <div className="today-task-copy"><strong>{event.title}</strong>{event.note && <small>{event.note}</small>}<small className="today-task-details">{[event.feedbackAction?.object && `Feedback loop · ${event.feedbackAction.object}`, taskSchedule(event)].filter(Boolean).join(" · ")}</small></div>
+    <span className="today-task-time"><Clock3 size={13} />{taskTimeRange(event)}</span>
     <button type="button" className="today-task-delete" onClick={() => onDelete(event)} aria-label={`Delete ${event.title}`} title="Delete task"><Trash2 size={14} /></button>
   </article>;
 }
