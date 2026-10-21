@@ -4,8 +4,8 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import AppSidebar from "../AppSidebar";
 import { useAppDialogs } from "../AppDialogs";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Copy, Download, FolderOpen, FolderPlus, Library, Menu, Paintbrush, Pencil, Pin, Plus, RefreshCw, Save, Search, Trash2, X } from "lucide-react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { CheckSquare, ChevronDown, ChevronRight, Copy, Download, FileText, FolderOpen, FolderPlus, Heading1, Heading2, Library, List, ListOrdered, Menu, MessageSquare, Paintbrush, Pencil, Pin, Plus, RefreshCw, Save, Search, Trash2, Type, X } from "lucide-react";
 import { loadCanvasFiles, saveCanvasFiles, type CanvasFileMetaMap } from "../../lib/canvasFileStore";
 import { loadCanvasDocuments, saveCanvasDocuments } from "../../lib/canvasDocumentStore";
 
@@ -22,13 +22,301 @@ type CanvasDocument = {
   elements: any[];
   appState?: Record<string, any>;
   fileMeta?: CanvasFileMetaMap;
+  kind?: "note";
+  content?: string;
   /** Legacy inline files are read once and migrated to IndexedDB. */
   files?: Record<string, any>;
   resourceId?: string;
 };
 
+function markdownInline(source: string): ReactNode[] {
+  const pieces = source.split(/(\[[^\]]+\]\([^)]+\)|`[^`]+`|\*\*.+?\*\*|__.+?__|~~.+?~~|\*[^*]+\*|_[^_]+_)/g).filter(Boolean);
+  return pieces.map((piece, index) => {
+    const key = `inline-${index}`;
+    const link = piece.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+    if (link) {
+      const href = /^(https?:\/\/|mailto:|\/|#)/i.test(link[2]) ? link[2] : undefined;
+      return href ? <a key={key} href={href} target={href.startsWith("http") ? "_blank" : undefined} rel={href.startsWith("http") ? "noreferrer" : undefined}>{link[1]}</a> : link[1];
+    }
+    if (piece.startsWith("`")) return <code key={key}>{piece.slice(1, -1)}</code>;
+    if (piece.startsWith("**") || piece.startsWith("__")) return <strong key={key}>{piece.slice(2, -2)}</strong>;
+    if (piece.startsWith("~~")) return <del key={key}>{piece.slice(2, -2)}</del>;
+    if (piece.startsWith("*") || piece.startsWith("_")) return <em key={key}>{piece.slice(1, -1)}</em>;
+    return piece;
+  });
+}
+
+function MarkdownNotePreview({ source, onToggleTask }: { source: string; onToggleTask?: (lineIndex: number, checked: boolean) => void }) {
+  const lines = source.split(/\r?\n/);
+  const blocks: ReactNode[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) { index += 1; continue; }
+    if (line.startsWith("```")) {
+      const code: string[] = [];
+      index += 1;
+      while (index < lines.length && !lines[index].startsWith("```")) code.push(lines[index++]);
+      if (index < lines.length) index += 1;
+      blocks.push(<pre key={`block-${blocks.length}`}><code>{code.join("\n")}</code></pre>);
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      const Tag = `h${heading[1].length}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
+      blocks.push(<Tag key={`block-${blocks.length}`}>{markdownInline(heading[2])}</Tag>);
+      index += 1;
+      continue;
+    }
+    if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)) { blocks.push(<hr key={`block-${blocks.length}`} />); index += 1; continue; }
+    if (/^\s*>/.test(line)) {
+      const quote: string[] = [];
+      while (index < lines.length && /^\s*>/.test(lines[index])) quote.push(lines[index++].replace(/^\s*>\s?/, ""));
+      blocks.push(<blockquote key={`block-${blocks.length}`}>{quote.map((part, item) => <p key={item}>{markdownInline(part)}</p>)}</blockquote>);
+      continue;
+    }
+    const listMatch = line.match(/^\s*(?:([-+*])|(\d+)\.)\s+(.+)$/);
+    if (listMatch) {
+      const ordered = Boolean(listMatch[2]);
+      const items: ReactNode[] = [];
+      while (index < lines.length) {
+        const item = lines[index].match(/^\s*(?:([-+*])|(\d+)\.)\s+(.+)$/);
+        if (!item || Boolean(item[2]) !== ordered) break;
+        const task = item[3].match(/^\[([ xX])\]\s*(.*)$/);
+        const lineIndex = index;
+        items.push(task
+          ? <li className="canvas-note-task-item" key={items.length}><label><input type="checkbox" checked={task[1].toLowerCase() === "x"} onClick={(event) => event.stopPropagation()} onChange={(event) => onToggleTask?.(lineIndex, event.target.checked)} /><span>{markdownInline(task[2])}</span></label></li>
+          : <li key={items.length}>{markdownInline(item[3])}</li>);
+        index += 1;
+      }
+      blocks.push(ordered ? <ol key={`block-${blocks.length}`}>{items}</ol> : <ul key={`block-${blocks.length}`}>{items}</ul>);
+      continue;
+    }
+    const paragraph: string[] = [];
+    while (index < lines.length && lines[index].trim() && !/^(#{1,6}\s|```|\s*>|\s*(?:[-+*]|\d+\.)\s+)/.test(lines[index])) paragraph.push(lines[index++]);
+    blocks.push(<p key={`block-${blocks.length}`}>{paragraph.map((part, item) => <Fragment key={item}>{item > 0 && <br />}{markdownInline(part)}</Fragment>)}</p>);
+  }
+  return <div className="canvas-note-markdown">{blocks.length ? blocks : <p className="canvas-note-empty">Nothing to preview yet.</p>}</div>;
+}
+
+function MarkdownLinePreview({ line, inCode, onToggleTask }: { line: string; inCode: boolean; onToggleTask?: (checked: boolean) => void }) {
+  if (!line.trim()) return <div className="canvas-note-rendered-line"><br /></div>;
+  if (line.startsWith("```")) return <div className="canvas-note-rendered-line canvas-note-fence" aria-hidden="true" />;
+  if (inCode) return <pre className="canvas-note-rendered-code"><code>{line}</code></pre>;
+  const heading = line.match(/^(#{1,6})\s+(.+)$/);
+  if (heading) {
+    const Tag = `h${heading[1].length}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
+    return <Tag className="canvas-note-rendered-line">{markdownInline(heading[2])}</Tag>;
+  }
+  if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)) return <hr className="canvas-note-rendered-line" />;
+  const quote = line.match(/^\s*>\s?(.*)$/);
+  if (quote) return <blockquote className="canvas-note-rendered-line">{markdownInline(quote[1])}</blockquote>;
+  const task = line.match(/^\s*[-+*]\s+\[([ xX])\]\s*(.*)$/);
+  if (task) return <div className="canvas-note-rendered-line canvas-note-task-line"><input type="checkbox" checked={task[1].toLowerCase() === "x"} onClick={(event) => event.stopPropagation()} onChange={(event) => onToggleTask?.(event.target.checked)} /><span>{markdownInline(task[2])}</span></div>;
+  const list = line.match(/^\s*(?:([-+*])|(\d+)\.)\s+(.+)$/);
+  if (list) return <div className="canvas-note-rendered-line canvas-note-list-line"><span>{list[2] ? `${list[2]}.` : "•"}</span>{markdownInline(list[3])}</div>;
+  return <div className="canvas-note-rendered-line">{markdownInline(line)}</div>;
+}
+
+function CanvasNoteEditor({ note, onUpdate }: { note: CanvasDocument; onUpdate: (update: Partial<CanvasDocument>) => void }) {
+  const [preview, setPreview] = useState(false);
+  const [editingLine, setEditingLine] = useState<number | null>(0);
+  const [blockMenuLine, setBlockMenuLine] = useState<number | null>(null);
+  const lineInputRef = useRef<HTMLTextAreaElement>(null);
+  const pendingCaretRef = useRef<"start" | "end">("start");
+  const lines = (note.content || "").split(/\r?\n/);
+  useEffect(() => {
+    if (blockMenuLine === null) return;
+    const closeMenu = (event: MouseEvent) => {
+      const target = event.target;
+      if (target instanceof Element && !target.closest(".canvas-note-block-menu, .canvas-note-block-trigger")) setBlockMenuLine(null);
+    };
+    document.addEventListener("mousedown", closeMenu);
+    return () => document.removeEventListener("mousedown", closeMenu);
+  }, [blockMenuLine]);
+  useEffect(() => {
+    if (preview || editingLine === null) return;
+    const input = lineInputRef.current;
+    if (!input) return;
+    input.focus();
+    const position = pendingCaretRef.current === "end" ? input.value.length : 0;
+    input.setSelectionRange(position, position);
+  }, [editingLine, preview]);
+  const updateLine = (index: number, value: string, caret: number) => {
+    const nextLines = [...lines];
+    nextLines.splice(index, 1, ...value.split("\n"));
+    onUpdate({ content: nextLines.join("\n") });
+    setEditingLine(index + value.slice(0, caret).split("\n").length - 1);
+  };
+  const toggleTask = (index: number, checked: boolean) => {
+    const nextLines = [...lines];
+    nextLines[index] = nextLines[index].replace(/\[([ xX])\]/, checked ? "[x]" : "[ ]");
+    onUpdate({ content: nextLines.join("\n") });
+  };
+  const continueListOnEnter = (event: ReactKeyboardEvent<HTMLTextAreaElement>, index: number) => {
+    const input = event.currentTarget;
+    if (event.key !== "Enter" || input.selectionStart !== input.selectionEnd || input.selectionEnd !== input.value.length) return false;
+    const value = input.value;
+    const ordered = value.match(/^(\s*)(\d+)\.\s*(.*)$/);
+    const task = value.match(/^(\s*)([-+*])\s+\[([ xX])\]\s*(.*)$/);
+    const bullet = value.match(/^(\s*)([-+*])\s+(.*)$/);
+    const item = ordered ? { indent: ordered[1], body: ordered[3], next: `${ordered[1]}${Number(ordered[2]) + 1}. ` }
+      : task ? { indent: task[1], body: task[4], next: `${task[1]}${task[2]} [ ] ` }
+        : bullet ? { indent: bullet[1], body: bullet[3], next: `${bullet[1]}${bullet[2]} ` }
+          : null;
+    if (!item) return false;
+    event.preventDefault();
+    const nextLines = [...lines];
+    if (!item.body.trim()) {
+      nextLines[index] = item.indent;
+      onUpdate({ content: nextLines.join("\n") });
+      setEditingLine(index);
+      requestAnimationFrame(() => {
+        const activeInput = lineInputRef.current;
+        if (activeInput) { activeInput.focus(); activeInput.setSelectionRange(0, 0); }
+      });
+      return true;
+    }
+    nextLines.splice(index, 1, value, item.next);
+    pendingCaretRef.current = "end";
+    onUpdate({ content: nextLines.join("\n") });
+    setEditingLine(index + 1);
+    return true;
+  };
+  const applyBlock = (index: number, block: "numbered" | "todo" | "bulleted" | "text" | "ai-note" | "heading1" | "heading2") => {
+    const current = lines[index] || "";
+    const body = current.replace(/^\s*(?:#{1,6}\s+|-\s+\[\s?\]\s*|[-+*]\s+|\d+\.\s+|>\s?)/, "");
+    const prefix = {
+      numbered: "1. ",
+      todo: "- [ ] ",
+      bulleted: "- ",
+      text: "",
+      "ai-note": "> **AI Note** ",
+      heading1: "# ",
+      heading2: "## ",
+    }[block];
+    const nextLines = [...lines];
+    nextLines[index] = prefix + body;
+    onUpdate({ content: nextLines.join("\n") });
+    setBlockMenuLine(null);
+    pendingCaretRef.current = "end";
+    setEditingLine(index);
+    requestAnimationFrame(() => {
+      const input = lineInputRef.current;
+      if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+    });
+  };
+  let insideCode = false;
+  return <section className="canvas-note-editor" aria-label="Note editor">
+    <div className="canvas-note-toolbar"><FileText size={16} /><span>NOTE</span><small>{new Date(note.updatedAt).toLocaleString()}</small><div className="canvas-note-modes"><button type="button" className={!preview ? "is-active" : ""} onClick={() => { setEditingLine((current) => current ?? 0); setPreview(false); }}>Write</button><button type="button" className={preview ? "is-active" : ""} onClick={() => { setPreview(true); setEditingLine(null); }}>Preview</button></div></div>
+    <input className="canvas-note-title" aria-label="Note title" value={note.name} onChange={(event) => onUpdate({ name: event.target.value })} placeholder="Untitled note" />
+    {preview ? <MarkdownNotePreview source={note.content || ""} onToggleTask={toggleTask} /> : <div className="canvas-note-lines" aria-label="Markdown note content">{lines.map((line, index) => {
+      const wasInsideCode = insideCode;
+      if (line.startsWith("```")) insideCode = !insideCode;
+      return <div key={index} className={`canvas-note-line ${editingLine === index ? "is-editing" : ""}`} role={editingLine === index ? undefined : "button"} tabIndex={editingLine === index ? undefined : 0} aria-label={editingLine === index ? undefined : `Edit note line ${index + 1}`} onClick={() => { if (editingLine !== index) { pendingCaretRef.current = "start"; setEditingLine(index); } }} onKeyDown={(event) => { if (event.target !== event.currentTarget) return; if (editingLine !== index && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); pendingCaretRef.current = "start"; setEditingLine(index); } }}>
+        <button type="button" className="canvas-note-block-trigger" aria-label={`Add block at line ${index + 1}`} aria-expanded={blockMenuLine === index} onClick={(event) => { event.stopPropagation(); setBlockMenuLine((current) => current === index ? null : index); }}><Plus size={15} /></button>
+        {blockMenuLine === index && <div className="canvas-note-block-menu" role="menu" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setBlockMenuLine(null); } }}>
+          <div className="canvas-note-block-menu-heading">Suggested</div>
+          <button type="button" role="menuitem" onClick={() => applyBlock(index, "numbered")}><ListOrdered size={15} /><span>Numbered list</span><kbd>1.</kbd></button>
+          <button type="button" role="menuitem" onClick={() => applyBlock(index, "todo")}><CheckSquare size={15} /><span>To-do list</span><kbd>☐</kbd></button>
+          <button type="button" role="menuitem" onClick={() => applyBlock(index, "bulleted")}><List size={15} /><span>Bulleted list</span><kbd>−</kbd></button>
+          <div className="canvas-note-block-divider" />
+          <div className="canvas-note-block-heading">Basic blocks</div>
+          <button type="button" role="menuitem" onClick={() => applyBlock(index, "text")}><Type size={15} /><span>Text</span></button>
+          <button type="button" role="menuitem" onClick={() => applyBlock(index, "ai-note")}><MessageSquare size={15} /><span>AI Note</span><kbd>ai</kbd></button>
+          <button type="button" role="menuitem" onClick={() => applyBlock(index, "heading1")}><Heading1 size={15} /><span>Heading 1</span><kbd>#</kbd></button>
+          <button type="button" role="menuitem" onClick={() => applyBlock(index, "heading2")}><Heading2 size={15} /><span>Heading 2</span><kbd>##</kbd></button>
+          <button type="button" className="canvas-note-block-close" onClick={() => setBlockMenuLine(null)}><span>Close menu</span><kbd>esc</kbd></button>
+        </div>}
+        {editingLine === index ? <textarea ref={lineInputRef} className="canvas-note-line-input" aria-label={`Edit note line ${index + 1}`} rows={Math.max(1, line.split("\n").length)} value={line} onChange={(event) => updateLine(index, event.target.value, event.target.selectionStart)} onKeyDown={(event) => {
+          const input = event.currentTarget;
+          if (event.key === "Escape") { setEditingLine(null); return; }
+          if (continueListOnEnter(event, index)) return;
+          if (event.key === "Backspace" && input.selectionStart === 0 && input.selectionEnd === 0 && index > 0) {
+            event.preventDefault();
+            const previousLine = lines[index - 1];
+            const nextLines = [...lines];
+            nextLines.splice(index - 1, 2, previousLine + input.value);
+            pendingCaretRef.current = "end";
+            onUpdate({ content: nextLines.join("\n") });
+            setEditingLine(index - 1);
+          }
+          if (event.key === "ArrowUp" && input.selectionStart === 0 && index > 0) { event.preventDefault(); pendingCaretRef.current = "end"; setEditingLine(index - 1); }
+          if (event.key === "ArrowDown" && input.selectionEnd === input.value.length && index < lines.length - 1) { event.preventDefault(); pendingCaretRef.current = "start"; setEditingLine(index + 1); }
+        }} onKeyUp={(event) => { const localLine = event.currentTarget.value.slice(0, event.currentTarget.selectionStart).split("\n").length - 1; setEditingLine(index + localLine); }} placeholder="Type something…" />
+          : <MarkdownLinePreview line={line} inCode={wasInsideCode} onToggleTask={(checked) => toggleTask(index, checked)} />}
+      </div>;
+    })}</div>}
+  </section>;
+}
+
 type CanvasResource = { id: string; name: string; parentId: string | null };
 type CanvasContextMenu = { kind: "resource" | "canvas"; id: string; x: number; y: number };
+type CanvasLayout = { kind: "document"; id: string } | { kind: "split"; id: string; direction: "vertical" | "horizontal"; ratio: number; first: CanvasLayout; second: CanvasLayout };
+
+function normalizeCanvasLayout(value: unknown): CanvasLayout | null {
+  if (!value || typeof value !== "object") return null;
+  const node = value as Record<string, any>;
+  if (node.kind === "document" && typeof node.id === "string") return { kind: "document", id: node.id };
+  if (node.kind !== "split" || (node.direction !== "vertical" && node.direction !== "horizontal")) return null;
+  const first = normalizeCanvasLayout(node.first);
+  const second = normalizeCanvasLayout(node.second);
+  if (!first || !second) return null;
+  const ratio = typeof node.ratio === "number" && Number.isFinite(node.ratio) ? Math.min(.85, Math.max(.15, node.ratio)) : .5;
+  return { kind: "split", id: typeof node.id === "string" ? node.id : crypto.randomUUID(), direction: node.direction, ratio, first, second };
+}
+
+function layoutHasDocument(layout: CanvasLayout | null, id: string): boolean {
+  if (!layout) return false;
+  if (layout.kind === "document") return layout.id === id;
+  return layoutHasDocument(layout.first, id) || layoutHasDocument(layout.second, id);
+}
+
+function replaceLayoutDocument(layout: CanvasLayout | null, id: string, replacement: CanvasLayout): CanvasLayout | null {
+  if (!layout) return null;
+  if (layout.kind === "document") return layout.id === id ? replacement : layout;
+  return { ...layout, first: replaceLayoutDocument(layout.first, id, replacement)!, second: replaceLayoutDocument(layout.second, id, replacement)! };
+}
+
+function mapLayoutDocuments(layout: CanvasLayout | null, mapId: (id: string) => string): CanvasLayout | null {
+  if (!layout) return null;
+  if (layout.kind === "document") return { ...layout, id: mapId(layout.id) };
+  return { ...layout, first: mapLayoutDocuments(layout.first, mapId)!, second: mapLayoutDocuments(layout.second, mapId)! };
+}
+
+function updateLayoutRatio(layout: CanvasLayout | null, splitId: string, ratio: number): CanvasLayout | null {
+  if (!layout) return null;
+  if (layout.kind === "document") return layout;
+  if (layout.id === splitId) return { ...layout, ratio };
+  return { ...layout, first: updateLayoutRatio(layout.first, splitId, ratio)!, second: updateLayoutRatio(layout.second, splitId, ratio)! };
+}
+
+function removeLayoutDocument(layout: CanvasLayout | null, id: string): CanvasLayout | null {
+  if (!layout) return null;
+  if (layout.kind === "document") return layout.id === id ? null : layout;
+  const first = removeLayoutDocument(layout.first, id);
+  const second = removeLayoutDocument(layout.second, id);
+  if (!first) return second;
+  if (!second) return first;
+  return { ...layout, first, second };
+}
+
+function firstLayoutDocument(layout: CanvasLayout | null): string | null {
+  if (!layout) return null;
+  return layout.kind === "document" ? layout.id : firstLayoutDocument(layout.first) || firstLayoutDocument(layout.second);
+}
+
+function isValidCanvasLayout(value: unknown, validIds: Set<string>, seen = new Set<string>()): value is CanvasLayout {
+  if (!value || typeof value !== "object") return false;
+  const node = value as Record<string, unknown>;
+  if (node.kind === "document") {
+    if (typeof node.id !== "string" || !validIds.has(node.id) || seen.has(node.id)) return false;
+    seen.add(node.id);
+    return true;
+  }
+  if (node.kind !== "split" || typeof node.id !== "string" || typeof node.ratio !== "number" || !Number.isFinite(node.ratio) || node.ratio < .15 || node.ratio > .85 || (node.direction !== "vertical" && node.direction !== "horizontal")) return false;
+  return isValidCanvasLayout(node.first, validIds, seen) && isValidCanvasLayout(node.second, validIds, seen);
+}
 
 const CanvasDrawingSurface = memo(function CanvasDrawingSurface({
   document,
@@ -545,6 +833,11 @@ export default function CanvasHome() {
   const dialogs = useAppDialogs();
   const [documents, setDocuments] = useState<CanvasDocument[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [splitLayout, setSplitLayout] = useState<CanvasLayout | null>(null);
+  const splitResizeRef = useRef<{ id: string; pointerId: number; startCoordinate: number; size: number; ratio: number; direction: "vertical" | "horizontal" } | null>(null);
+  const [focusedPaneId, setFocusedPaneId] = useState<string | null>(null);
+  const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
+  const [splitDropSide, setSplitDropSide] = useState<"left" | "right" | "top" | "bottom" | null>(null);
   const [ready, setReady] = useState(false);
   const [saveStatus, setSaveStatus] = useState("Saved on this device");
   const [isSavingCanvas, setIsSavingCanvas] = useState(false);
@@ -593,7 +886,7 @@ export default function CanvasHome() {
         document,
         resourceName: resources.find((resource) => resource.id === document.resourceId)?.name || "Unfiled",
       }))
-      .filter(({ document, resourceName }) => `${document.name} ${resourceName}`.toLocaleLowerCase().includes(query))
+      .filter(({ document, resourceName }) => `${document.name} ${document.content || ""} ${resourceName}`.toLocaleLowerCase().includes(query))
       .sort((left, right) => right.document.updatedAt - left.document.updatedAt)
       .slice(0, 50);
   }, [canvasSearchQuery, documents, resources]);
@@ -629,12 +922,33 @@ export default function CanvasHome() {
         const loadedPins = Array.isArray(workspace.pinnedIds) ? workspace.pinnedIds.filter((id: string) => validIds.has(id)) : [];
         const loadedResourcePins = Array.isArray(workspace.pinnedResourceIds) ? workspace.pinnedResourceIds.filter((id: string) => resourceIds.has(id)) : [];
         const loadedExpandedResources = Array.isArray(workspace.expandedResourceIds) ? workspace.expandedResourceIds.filter((id: string) => resourceIds.has(id)) : [];
-        setOpenTabIds(loadedTabs);
+        const oldSplit = workspace.splitPane as { firstId?: string; secondId?: string; direction?: string } | undefined;
+        const savedLayout = workspace.splitLayout || (oldSplit?.firstId && oldSplit.secondId ? {
+          kind: "split",
+          id: crypto.randomUUID(),
+          ratio: .5,
+          direction: oldSplit.direction,
+          first: { kind: "document", id: oldSplit.firstId },
+          second: { kind: "document", id: oldSplit.secondId },
+        } : null);
+        const normalizedLayout = normalizeCanvasLayout(savedLayout);
+        const loadedSplitLayout = isValidCanvasLayout(normalizedLayout, validIds) ? normalizedLayout : null;
+        const splitDocumentIds: string[] = [];
+        const collectLayoutIds = (node: CanvasLayout | null) => {
+          if (!node) return;
+          if (node.kind === "document") splitDocumentIds.push(node.id);
+          else { collectLayoutIds(node.first); collectLayoutIds(node.second); }
+        };
+        collectLayoutIds(loadedSplitLayout);
+        const loadedTabsWithSplit = Array.from(new Set([...loadedTabs, ...splitDocumentIds]));
+        setOpenTabIds(loadedTabsWithSplit);
         setPinnedIds(loadedPins);
         setPinnedResourceIds(loadedResourcePins);
         setExpandedResourceIds(loadedExpandedResources.length ? loadedExpandedResources : [nextResources[0].id]);
         setSelectedResourceId(resourceIds.has(workspace.selectedResourceId) ? workspace.selectedResourceId : nextResources[0].id);
-        setActiveId(loadedTabs.includes(workspace.activeId) ? workspace.activeId : null);
+        setSplitLayout(loadedSplitLayout);
+        setActiveId(loadedTabsWithSplit.includes(workspace.activeId) ? workspace.activeId : null);
+        setFocusedPaneId(loadedTabsWithSplit.includes(workspace.focusedPaneId) ? workspace.focusedPaneId : workspace.activeId ?? null);
         setReady(true);
       }).catch(() => {
         if (!cancelled) { setDocuments([]); setReady(true); setSaveStatus("Canvas storage unavailable"); }
@@ -645,6 +959,14 @@ export default function CanvasHome() {
     }
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    if (!splitLayout || !activeId) return;
+    if (layoutHasDocument(splitLayout, activeId)) { setFocusedPaneId(activeId); return; }
+    const targetId = focusedPaneId && layoutHasDocument(splitLayout, focusedPaneId) ? focusedPaneId : firstLayoutDocument(splitLayout);
+    if (targetId) setSplitLayout((current) => replaceLayoutDocument(current, targetId, { kind: "document", id: activeId }));
+    setFocusedPaneId(activeId);
+  }, [activeId, focusedPaneId, splitLayout]);
 
   useEffect(() => {
     if (!ready || restoredHashRef.current) return;
@@ -685,8 +1007,8 @@ export default function CanvasHome() {
 
   useEffect(() => {
     if (!ready) return;
-    localStorage.setItem(WORKSPACE_KEY, JSON.stringify({ openTabIds, pinnedIds, pinnedResourceIds, activeId, resources, selectedResourceId, expandedResourceIds }));
-  }, [activeId, expandedResourceIds, openTabIds, pinnedIds, pinnedResourceIds, ready, resources, selectedResourceId]);
+    localStorage.setItem(WORKSPACE_KEY, JSON.stringify({ openTabIds, pinnedIds, pinnedResourceIds, activeId, focusedPaneId, splitLayout, resources, selectedResourceId, expandedResourceIds }));
+  }, [activeId, expandedResourceIds, focusedPaneId, openTabIds, pinnedIds, pinnedResourceIds, ready, resources, selectedResourceId, splitLayout]);
 
   const captureCanvasSnapshot = useCallback((canvasId: string | null) => {
     if (!canvasId) return;
@@ -777,6 +1099,32 @@ export default function CanvasHome() {
       return Array.from(next);
     });
   }, [activeId, captureCanvasSnapshot, resources, selectedResourceId]);
+
+  const createNote = useCallback(() => {
+    captureCanvasSnapshot(activeId);
+    const resourceId = libraryResourceId && resources.some((resource) => resource.id === libraryResourceId)
+      ? libraryResourceId
+      : selectedResourceId && resources.some((resource) => resource.id === selectedResourceId)
+      ? selectedResourceId
+      : resources[0]?.id;
+    const document: CanvasDocument = { ...makeCanvas("Untitled note"), kind: "note", content: "", resourceId };
+    setDocuments((current) => [document, ...current]);
+    setOpenTabIds((current) => [...current, document.id]);
+    setActiveId(document.id);
+    setLibraryResourceId(null);
+    if (resourceId) {
+      setSelectedResourceId(resourceId);
+      setExpandedResourceIds((current) => {
+        const next = new Set(current);
+        let resource = resources.find((item) => item.id === resourceId);
+        while (resource) {
+          next.add(resource.id);
+          resource = resource.parentId ? resources.find((item) => item.id === resource?.parentId) : undefined;
+        }
+        return Array.from(next);
+      });
+    }
+  }, [activeId, captureCanvasSnapshot, libraryResourceId, resources, selectedResourceId]);
 
   const createSubCanvas = useCallback((canvasId: string) => {
     const parentCanvas = documents.find((document) => document.id === canvasId);
@@ -979,6 +1327,15 @@ export default function CanvasHome() {
   }, [activeId, saveActiveCanvas]);
 
   const downloadDocument = useCallback(async (document: CanvasDocument) => {
+    if (document.kind === "note") {
+      const noteUrl = URL.createObjectURL(new Blob([document.content || ""], { type: "text/plain;charset=utf-8" }));
+      const anchor = window.document.createElement("a");
+      anchor.href = noteUrl;
+      anchor.download = `${document.name.trim() || "note"}.txt`;
+      anchor.click();
+      URL.revokeObjectURL(noteUrl);
+      return;
+    }
     const files = await loadCanvasFiles(document.id, document.fileMeta, document.files);
     const payload = {
       type: "excalidraw",
@@ -1042,17 +1399,74 @@ export default function CanvasHome() {
     setDocuments((current) => current.filter((document) => document.id !== id));
     setOpenTabIds((current) => current.filter((tabId) => tabId !== id));
     setPinnedIds((current) => current.filter((pinnedId) => pinnedId !== id));
-    if (activeId === id) setActiveId(null);
-  }, [activeId]);
+    if (layoutHasDocument(splitLayout, id)) {
+      const remaining = removeLayoutDocument(splitLayout, id);
+      const survivorId = firstLayoutDocument(remaining);
+      if (remaining?.kind === "document") setSplitLayout(null);
+      else setSplitLayout(remaining);
+      if (activeId === id || !survivorId) setActiveId(survivorId);
+      if (focusedPaneId === id || !focusedPaneId) setFocusedPaneId(survivorId);
+    } else if (activeId === id) setActiveId(null);
+  }, [activeId, focusedPaneId, splitLayout]);
 
   const closeTab = useCallback((id: string) => {
     if (pinnedIds.includes(id)) return;
-    if (activeId === id) captureCanvasSnapshot(id);
+    if (activeId === id || layoutHasDocument(splitLayout, id)) captureCanvasSnapshot(id);
     const closingIndex = openTabIds.indexOf(id);
     const remaining = openTabIds.filter((tabId) => tabId !== id);
     setOpenTabIds(remaining);
-    if (activeId === id) setActiveId(remaining[Math.min(closingIndex, remaining.length - 1)] ?? null);
-  }, [activeId, captureCanvasSnapshot, openTabIds, pinnedIds]);
+    if (layoutHasDocument(splitLayout, id)) {
+      const remainingLayout = removeLayoutDocument(splitLayout, id);
+      const survivingId = firstLayoutDocument(remainingLayout);
+      setSplitLayout(remainingLayout?.kind === "document" ? null : remainingLayout);
+      if (activeId === id) setActiveId(survivingId);
+      if (focusedPaneId === id) setFocusedPaneId(survivingId);
+    } else if (activeId === id) setActiveId(remaining[Math.min(closingIndex, remaining.length - 1)] ?? null);
+  }, [activeId, captureCanvasSnapshot, focusedPaneId, openTabIds, pinnedIds, splitLayout]);
+
+  const reorderTab = useCallback((draggedId: string, targetId: string) => {
+    if (draggedId === targetId) return;
+    setOpenTabIds((current) => {
+      const from = current.indexOf(draggedId);
+      const to = current.indexOf(targetId);
+      if (from < 0 || to < 0) return current;
+      const next = [...current];
+      next.splice(from, 1);
+      next.splice(to, 0, draggedId);
+      return next;
+    });
+  }, []);
+
+  const createSplit = useCallback((draggedId: string, side: "left" | "right" | "top" | "bottom", targetId = activeId) => {
+    if (!targetId || draggedId === targetId || !documentsRef.current.some((document) => document.id === draggedId)) return;
+    captureCanvasSnapshot(activeId);
+    setOpenTabIds((current) => current.includes(draggedId) ? current : [...current, draggedId]);
+    setSplitLayout((current) => {
+      if (current && layoutHasDocument(current, draggedId)) {
+        return mapLayoutDocuments(current, (id) => id === targetId ? draggedId : id === draggedId ? targetId : id);
+      }
+      const target = current || { kind: "document" as const, id: targetId };
+      const before = side === "left" || side === "top";
+      const draggedLeaf: CanvasLayout = { kind: "document", id: draggedId };
+      const split: CanvasLayout = { kind: "split", id: crypto.randomUUID(), direction: side === "left" || side === "right" ? "vertical" : "horizontal", ratio: .5, first: before ? draggedLeaf : { kind: "document", id: targetId }, second: before ? { kind: "document", id: targetId } : draggedLeaf };
+      return replaceLayoutDocument(target, targetId, split);
+    });
+    setFocusedPaneId(draggedId);
+    setActiveId(draggedId);
+  }, [activeId, captureCanvasSnapshot]);
+
+  const dropIntoSplitPane = useCallback((id: string, targetId: string) => {
+    if (!splitLayout || id === targetId || !documentsRef.current.some((document) => document.id === id)) return;
+    captureCanvasSnapshot(activeId);
+    setOpenTabIds((current) => current.includes(id) ? current : [...current, id]);
+    if (layoutHasDocument(splitLayout, id)) {
+      setSplitLayout((current) => mapLayoutDocuments(current, (leafId) => leafId === targetId ? id : leafId === id ? targetId : leafId));
+    } else {
+      setSplitLayout((current) => replaceLayoutDocument(current, targetId, { kind: "document", id }));
+    }
+    setFocusedPaneId(id);
+    setActiveId(id);
+  }, [activeId, captureCanvasSnapshot, splitLayout]);
 
   const togglePin = useCallback((id: string) => {
     setPinnedIds((current) => current.includes(id) ? current.filter((pinnedId) => pinnedId !== id) : [...current, id]);
@@ -1120,7 +1534,7 @@ export default function CanvasHome() {
     const canvas = documents.find((item) => item.id === canvasId);
     setContextMenu(null);
     if (!canvas) return;
-    const name = (await dialogs.prompt({ title: "Rename canvas", message: "Canvas name", defaultValue: canvas.name, confirmLabel: "Save" }))?.trim();
+    const name = (await dialogs.prompt({ title: canvas.kind === "note" ? "Rename note" : "Rename canvas", message: canvas.kind === "note" ? "Note name" : "Canvas name", defaultValue: canvas.name, confirmLabel: "Save" }))?.trim();
     if (name) updateCanvas(canvasId, { name });
   }, [dialogs, documents, updateCanvas]);
 
@@ -1132,6 +1546,8 @@ export default function CanvasHome() {
     setSelectedResourceId(canvas.resourceId);
     setLibraryResourceId(canvas.resourceId);
     setActiveId(null);
+    setSplitLayout(null);
+    setFocusedPaneId(null);
     setExpandedResourceIds((current) => {
       const next = new Set(current);
       let resource = resources.find((item) => item.id === canvas.resourceId);
@@ -1168,7 +1584,95 @@ export default function CanvasHome() {
     setSelectedResourceId(id);
     setLibraryResourceId(id);
     setActiveId(null);
+    setSplitLayout(null);
+    setFocusedPaneId(null);
   }, [activeId, captureCanvasSnapshot]);
+
+  const renderDocumentContent = (document: CanvasDocument) => {
+    if (document.kind === "note") return <CanvasNoteEditor key={document.id} note={document} onUpdate={(update) => updateCanvas(document.id, update)} />;
+    const files = loadedCanvasFiles?.canvasId === document.id
+      ? loadedCanvasFiles.files
+      : canvasFilesCacheRef.current.get(document.id) || document.files || EMPTY_FILES;
+    return <section className="canvas-wrap" aria-label={`Drawing canvas: ${document.name || "Untitled canvas"}`}>
+      <CanvasDrawingSurface document={document} files={files} onChange={getCanvasChangeHandler(document.id)} onApi={getCanvasApiHandler(document.id)} />
+    </section>;
+  };
+
+  const closeSplit = (id: string) => {
+    if (!splitLayout) return;
+    const remainingLayout = removeLayoutDocument(splitLayout, id);
+    const remainingId = firstLayoutDocument(remainingLayout);
+    captureCanvasSnapshot(activeId);
+    setSplitLayout(remainingLayout?.kind === "document" ? null : remainingLayout);
+    setFocusedPaneId(remainingId);
+    setActiveId(remainingId);
+  };
+
+  const renderDocumentPane = (id: string): ReactNode => {
+    const document = documents.find((item) => item.id === id);
+    if (!document) return null;
+    return <section key={id} className={`canvas-split-pane ${activeId === id ? "is-focused" : ""}`} aria-label={`Canvas pane: ${document.name || "Untitled"}`} onMouseDown={() => { setFocusedPaneId(id); setActiveId(id); }} onDragOver={(event) => { if (draggingTabId) event.preventDefault(); }} onDrop={(event) => {
+      const draggedId = event.dataTransfer.getData("application/x-canvas-document-id");
+      if (draggedId) { event.preventDefault(); event.stopPropagation(); dropIntoSplitPane(draggedId, id); }
+    }}>
+      <div className="canvas-split-pane-header"><span title={document.name}>{document.name || (document.kind === "note" ? "Untitled note" : "Untitled canvas")}</span><button type="button" aria-label="Close split pane" title="Close split pane" onClick={() => closeSplit(id)}><X size={14} /></button></div>
+      {renderDocumentContent(document)}
+      {draggingTabId && draggingTabId !== id && <div className="canvas-split-drop-overlay canvas-pane-split-overlay" onDragOver={(event) => event.preventDefault()}>
+        <div className="canvas-split-drop-hint">Split this pane</div>
+        {(["left", "right", "top", "bottom"] as const).map((side) => <button key={side} type="button" className={`canvas-split-drop-zone zone-${side} ${splitDropSide === side ? "is-hovered" : ""}`} onDragEnter={() => setSplitDropSide(side)} onDragOver={(event) => { event.preventDefault(); setSplitDropSide(side); }} onDrop={(event) => { const draggedId = event.dataTransfer.getData("application/x-canvas-document-id") || draggingTabId; event.preventDefault(); event.stopPropagation(); createSplit(draggedId, side, id); setSplitDropSide(null); }}><span>{side === "left" ? "Split left" : side === "right" ? "Split right" : side === "top" ? "Split above" : "Split below"}</span><small>{side === "left" || side === "right" ? "Vertical" : "Horizontal"}</small></button>)}
+        <button type="button" className="canvas-split-drop-zone zone-center" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { const draggedId = event.dataTransfer.getData("application/x-canvas-document-id") || draggingTabId; event.preventDefault(); event.stopPropagation(); dropIntoSplitPane(draggedId, id); }}>Move tab here</button>
+      </div>}
+    </section>;
+  };
+
+  const renderLayout = (node: CanvasLayout): ReactNode => node.kind === "document"
+    ? renderDocumentPane(node.id)
+    : <div className={`canvas-split-layout is-${node.direction}`} key={node.id} style={{ "--split-first": `${node.ratio}fr`, "--split-second": `${1 - node.ratio}fr` } as CSSProperties}>
+      {renderLayout(node.first)}
+      <div
+        className={`canvas-split-divider is-${node.direction}`}
+        role="separator"
+        aria-label={node.direction === "vertical" ? "Resize side-by-side panes" : "Resize stacked panes"}
+        aria-orientation={node.direction === "vertical" ? "vertical" : "horizontal"}
+        aria-valuenow={Math.round(node.ratio * 100)}
+        aria-valuemin={15}
+        aria-valuemax={85}
+        tabIndex={0}
+        onPointerDown={(event) => {
+          if (event.button !== 0) return;
+          const bounds = event.currentTarget.parentElement?.getBoundingClientRect();
+          const dividerBounds = event.currentTarget.getBoundingClientRect();
+          if (!bounds) return;
+          const direction = dividerBounds.width < dividerBounds.height ? "vertical" : "horizontal";
+          const size = direction === "vertical" ? bounds.width : bounds.height;
+          splitResizeRef.current = { id: node.id, pointerId: event.pointerId, startCoordinate: direction === "vertical" ? event.clientX : event.clientY, size, ratio: node.ratio, direction };
+          event.currentTarget.setPointerCapture(event.pointerId);
+          event.preventDefault();
+        }}
+        onPointerMove={(event) => {
+          const resize = splitResizeRef.current;
+          if (!resize || resize.pointerId !== event.pointerId || resize.id !== node.id) return;
+          const coordinate = resize.direction === "vertical" ? event.clientX : event.clientY;
+          const delta = (coordinate - resize.startCoordinate) / Math.max(1, resize.size);
+          const ratio = Math.min(.85, Math.max(.15, resize.ratio + delta));
+          setSplitLayout((current) => updateLayoutRatio(current, node.id, ratio));
+        }}
+        onPointerUp={(event) => { if (splitResizeRef.current?.pointerId === event.pointerId) splitResizeRef.current = null; }}
+        onPointerCancel={() => { splitResizeRef.current = null; }}
+        onLostPointerCapture={() => { splitResizeRef.current = null; }}
+        onKeyDown={(event) => {
+          const bounds = event.currentTarget.getBoundingClientRect();
+          const direction = bounds.width < bounds.height ? "vertical" : "horizontal";
+          const negative = direction === "vertical" ? event.key === "ArrowLeft" : event.key === "ArrowUp";
+          const positive = direction === "vertical" ? event.key === "ArrowRight" : event.key === "ArrowDown";
+          if (!negative && !positive) return;
+          event.preventDefault();
+          const ratio = Math.min(.85, Math.max(.15, node.ratio + (negative ? -.02 : .02)));
+          setSplitLayout((current) => updateLayoutRatio(current, node.id, ratio));
+        }}
+      />
+      {renderLayout(node.second)}
+    </div>;
 
   if (!ready) return <main className="loading-screen">Opening your canvas…</main>;
 
@@ -1190,7 +1694,7 @@ export default function CanvasHome() {
               <div className="sidebar-heading-label"><Library size={14} /><h2>RESOURCE CARDS</h2></div>
               <button className="icon-btn sidebar-add" title="Add resource card" aria-label="Add resource card" onClick={() => createResource(null)}><Plus size={17} /></button>
             </div>
-            <label className="sidebar-search"><Search size={14} /><input value={sidebarQuery} onChange={(event) => setSidebarQuery(event.target.value)} placeholder="Find a canvas" /></label>
+            <label className="sidebar-search"><Search size={14} /><input value={sidebarQuery} onChange={(event) => setSidebarQuery(event.target.value)} placeholder="Find a canvas or note" /></label>
             <div className="sidebar-group sidebar-all-group">
               <div className="sidebar-group-title"><Library size={12} /> Resource cards <span>{resources.length}</span></div>
               {(resourcesByParent.get("") || []).length ? (resourcesByParent.get("") || []).map((resource) => (
@@ -1227,10 +1731,10 @@ export default function CanvasHome() {
                   </div>
                 ))}
                 {openTabs.map((document) => (
-                  <div key={document.id} className={`canvas-tab ${activeId === document.id ? "is-active" : ""}`} onContextMenu={(event) => handleCanvasContextMenu(event, document.id)}>
+                  <div key={document.id} className={`canvas-tab ${activeId === document.id ? "is-active" : ""}`} draggable onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-canvas-document-id", document.id); setDraggingTabId(document.id); }} onDragEnd={() => { setDraggingTabId(null); setSplitDropSide(null); }} onDragOver={(event) => { if (draggingTabId && draggingTabId !== document.id) event.preventDefault(); }} onDrop={(event) => { const draggedId = event.dataTransfer.getData("application/x-canvas-document-id"); if (draggedId && draggedId !== document.id) { event.preventDefault(); event.stopPropagation(); reorderTab(draggedId, document.id); } }} onContextMenu={(event) => handleCanvasContextMenu(event, document.id)}>
                     <button className="tab-select" title={document.name} onClick={() => openCanvas(document.id)}>
                       {pinnedIds.includes(document.id) && <Pin size={12} className="tab-pin" />}
-                      <span>{document.name || "Untitled canvas"}</span>
+                      <span>{document.name || (document.kind === "note" ? "Untitled note" : "Untitled canvas")}</span>
                     </button>
                     <button className="tab-close" aria-label={pinnedIds.includes(document.id) ? "Unpin canvas tab" : "Close canvas tab"} title={pinnedIds.includes(document.id) ? "Unpin to close tab" : "Close tab"} onClick={() => pinnedIds.includes(document.id) ? togglePin(document.id) : closeTab(document.id)}>
                       {pinnedIds.includes(document.id) ? <Pin size={12} /> : <X size={14} />}
@@ -1239,27 +1743,14 @@ export default function CanvasHome() {
                 ))}
               </div>
               {(openTabs.length > 0 || resources.some((resource) => pinnedResourceIds.includes(resource.id))) && <>
-                <button className="tab-action" title="Search and open canvas" aria-label="Search and open canvas" onClick={() => { setCanvasSearchQuery(""); setCanvasSearchOpen(true); }}><Search size={15} /></button>
+                <button className="tab-action" title="Search and open canvas or note" aria-label="Search and open canvas or note" onClick={() => { setCanvasSearchQuery(""); setCanvasSearchOpen(true); }}><Search size={15} /></button>
                 {activeId && <button className="tab-action" title="Save canvas (Ctrl+S)" aria-label="Save canvas" onClick={() => void saveActiveCanvas()} disabled={isSavingCanvas}><Save size={15} /></button>}
                 <button className="tab-new" title="New canvas" aria-label="New canvas" onClick={() => createCanvas()}><Plus size={16} /></button>
               </>}
           </nav>
 
-          {active ? (
-            <section className="canvas-wrap" aria-label="Drawing canvas">
-              {(() => {
-                const files = loadedCanvasFiles?.canvasId === active.id
-                  ? loadedCanvasFiles.files
-                  : canvasFilesCacheRef.current.get(active.id) || active.files || EMPTY_FILES;
-                return <CanvasDrawingSurface
-                  document={active}
-                  files={files}
-                  onChange={getCanvasChangeHandler(active.id)}
-                  onApi={getCanvasApiHandler(active.id)}
-                />;
-              })()}
-            </section>
-          ) : (
+          <div className={`canvas-content-region ${splitLayout ? "is-split" : ""}`} onDragOver={(event) => { if (draggingTabId && !splitLayout) event.preventDefault(); }}>
+          {splitLayout ? renderLayout(splitLayout) : active ? renderDocumentContent(active) : (
             <section className="canvas-list">
               <span className="eyebrow">Canvas</span>
               <div className="list-heading">
@@ -1270,23 +1761,30 @@ export default function CanvasHome() {
                 </div>
               </div>
               <div className="canvas-grid">
-                  <button className="canvas-card canvas-new-card" onClick={() => createCanvas()}>
-                    <span className="canvas-new-icon"><Plus size={22} /></span>
-                    <strong>New Canvas</strong>
-                    <small>Create an empty canvas in this resource card.</small>
-                  </button>
+                  <article className="canvas-card canvas-new-card">
+                    <button type="button" className="canvas-new-choice" onClick={() => createCanvas()}><span className="canvas-new-icon"><Plus size={22} /></span><strong>New Canvas</strong><small>Create an empty canvas in this resource card.</small></button>
+                    <span className="canvas-new-divider" aria-hidden="true" />
+                    <button type="button" className="canvas-new-choice" onClick={createNote}><span className="canvas-new-icon"><FileText size={20} /></span><strong>New Notes</strong><small>Create a note in this resource card.</small></button>
+                  </article>
                   {libraryDocuments.map((document) => (
                     <article key={document.id} className="canvas-card-wrap">
-                      <button className="canvas-card" onClick={() => openCanvas(document.id)}>
-                        <CanvasCardPreview document={document} refreshSeed={thumbnailRefreshSeed} />
-                        <span className="canvas-card-caption"><strong><Paintbrush size={15} /> {document.name || "Untitled canvas"}</strong><small>Canvas</small></span>
+                      <button className={`canvas-card ${document.kind === "note" ? "canvas-note-card" : ""}`} onClick={() => openCanvas(document.id)}>
+                        {document.kind === "note" ? <><span className="canvas-note-card-preview">{document.content || "Empty note"}</span><span className="canvas-card-caption"><strong><FileText size={15} /> {document.name || "Untitled note"}</strong><small>Note</small></span></> : <><CanvasCardPreview document={document} refreshSeed={thumbnailRefreshSeed} /><span className="canvas-card-caption"><strong><Paintbrush size={15} /> {document.name || "Untitled canvas"}</strong><small>Canvas</small></span></>}
                       </button>
-                      <button className="delete-card" aria-label={`Delete ${document.name}`} title="Delete canvas" onClick={() => removeCanvas(document.id)}><X size={15} /></button>
+                      <button className="delete-card" aria-label={`Delete ${document.name}`} title={document.kind === "note" ? "Delete note" : "Delete canvas"} onClick={() => removeCanvas(document.id)}><X size={15} /></button>
                     </article>
                   ))}
               </div>
             </section>
           )}
+          {draggingTabId && !splitLayout && activeId && <div className="canvas-split-drop-overlay" onDragOver={(event) => event.preventDefault()}>
+            <div className="canvas-split-drop-hint">Drop tab to split this view</div>
+            {(["left", "right", "top", "bottom"] as const).map((side) => <button key={side} type="button" className={`canvas-split-drop-zone zone-${side} ${splitDropSide === side ? "is-hovered" : ""}`} onDragEnter={() => setSplitDropSide(side)} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setSplitDropSide(null); }} onDragOver={(event) => { event.preventDefault(); setSplitDropSide(side); }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); const id = event.dataTransfer.getData("application/x-canvas-document-id") || draggingTabId; createSplit(id, side, activeId); setSplitDropSide(null); }}>
+              <span>{side === "left" ? "Split left" : side === "right" ? "Split right" : side === "top" ? "Split above" : "Split below"}</span>
+              <small>{side === "left" || side === "right" ? "Vertical" : "Horizontal"}</small>
+            </button>)}
+          </div>}
+          </div>
         </div>
       </div>
       {contextMenu && <div className="canvas-context-menu" style={{ left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 236)), top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - (contextMenu.kind === "canvas" ? 212 : 146))) }}>
@@ -1298,27 +1796,27 @@ export default function CanvasHome() {
             <button type="button" className="canvas-context-menu-item is-danger" disabled={!resource?.parentId} onClick={() => deleteResource(contextMenu.id)}><Trash2 size={16} />Delete</button>
           </>;
         })() : <>
-          <button type="button" className="canvas-context-menu-item" onClick={() => { createSubCanvas(contextMenu.id); setContextMenu(null); }}><Paintbrush size={16} />Sub Canvas</button>
+          {documents.find((item) => item.id === contextMenu.id)?.kind !== "note" && <button type="button" className="canvas-context-menu-item" onClick={() => { createSubCanvas(contextMenu.id); setContextMenu(null); }}><Paintbrush size={16} />Sub Canvas</button>}
           <button type="button" className="canvas-context-menu-item" onClick={() => renameCanvas(contextMenu.id)}><Pencil size={16} />Rename</button>
-          <button type="button" className="canvas-context-menu-item" onClick={() => { const document = documents.find((item) => item.id === contextMenu.id); setContextMenu(null); if (document) void downloadDocument(document); }}><Download size={16} />Export canvas</button>
-          <button type="button" className="canvas-context-menu-item" onClick={() => showCanvasChildren(contextMenu.id)}><Library size={16} />View All Sub Canvas</button>
+          <button type="button" className="canvas-context-menu-item" onClick={() => { const document = documents.find((item) => item.id === contextMenu.id); setContextMenu(null); if (document) void downloadDocument(document); }}><Download size={16} />{documents.find((item) => item.id === contextMenu.id)?.kind === "note" ? "Export note" : "Export canvas"}</button>
+          {documents.find((item) => item.id === contextMenu.id)?.kind !== "note" && <button type="button" className="canvas-context-menu-item" onClick={() => showCanvasChildren(contextMenu.id)}><Library size={16} />View All Sub Canvas</button>}
           <button type="button" className="canvas-context-menu-item" onClick={() => void copyCanvasUrl(contextMenu.id)}><Copy size={16} />Copy URL</button>
           <button type="button" className="canvas-context-menu-item is-danger" onClick={() => { removeCanvas(contextMenu.id); setContextMenu(null); }}><Trash2 size={16} />Delete</button>
         </>}
       </div>}
       {canvasSearchOpen && <div className="canvas-search-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setCanvasSearchOpen(false); }}>
-        <section className="canvas-search-dialog" role="dialog" aria-modal="true" aria-label="Search and open canvas">
+        <section className="canvas-search-dialog" role="dialog" aria-modal="true" aria-label="Search and open canvas or note">
           <header className="canvas-search-heading"><div><span className="eyebrow">CANVAS</span><h2>Search and open</h2></div><button className="icon-btn" aria-label="Close search" onClick={() => setCanvasSearchOpen(false)}><X size={16} /></button></header>
-          <label className="canvas-search-input"><Search size={16} /><input autoFocus value={canvasSearchQuery} onChange={(event) => setCanvasSearchQuery(event.target.value)} placeholder="Search canvases or resource cards…" onKeyDown={(event) => { if (event.key === "Escape") setCanvasSearchOpen(false); if (event.key === "Enter" && canvasSearchResults.length) { const first = "document" in canvasSearchResults[0] ? canvasSearchResults[0].document : canvasSearchResults[0]; openCanvas(first.id); setCanvasSearchOpen(false); } }} /></label>
-          <div className="canvas-search-results" role="listbox" aria-label="Canvases">
+          <label className="canvas-search-input"><Search size={16} /><input autoFocus value={canvasSearchQuery} onChange={(event) => setCanvasSearchQuery(event.target.value)} placeholder="Search canvases, notes, or resource cards…" onKeyDown={(event) => { if (event.key === "Escape") setCanvasSearchOpen(false); if (event.key === "Enter" && canvasSearchResults.length) { const first = "document" in canvasSearchResults[0] ? canvasSearchResults[0].document : canvasSearchResults[0]; openCanvas(first.id); setCanvasSearchOpen(false); } }} /></label>
+          <div className="canvas-search-results" role="listbox" aria-label="Canvases and notes">
             {canvasSearchResults.map((result) => {
               const document = "document" in result ? result.document : result;
               const resourceName = "resourceName" in result ? result.resourceName : resources.find((resource) => resource.id === document.resourceId)?.name || "Unfiled";
-              return <button key={document.id} className="canvas-search-result" role="option" onClick={() => { openCanvas(document.id); setCanvasSearchOpen(false); }}><span className="canvas-search-result-icon"><Paintbrush size={14} /></span><span className="canvas-search-result-copy"><strong>{document.name || "Untitled canvas"}</strong><small>{resourceName}</small></span><ChevronRight size={15} /></button>;
+              return <button key={document.id} className="canvas-search-result" role="option" onClick={() => { openCanvas(document.id); setCanvasSearchOpen(false); }}><span className="canvas-search-result-icon">{document.kind === "note" ? <FileText size={14} /> : <Paintbrush size={14} />}</span><span className="canvas-search-result-copy"><strong>{document.name || (document.kind === "note" ? "Untitled note" : "Untitled canvas")}</strong><small>{resourceName} · {document.kind === "note" ? "Note" : "Canvas"}</small></span><ChevronRight size={15} /></button>;
             })}
-            {!canvasSearchResults.length && <p className="canvas-search-empty">No matching canvases found.</p>}
+            {!canvasSearchResults.length && <p className="canvas-search-empty">No matching items found.</p>}
           </div>
-          <footer className="canvas-search-footer">{documents.length} canvas{documents.length === 1 ? "" : "es"}</footer>
+          <footer className="canvas-search-footer">{documents.length} item{documents.length === 1 ? "" : "s"}</footer>
         </section>
       </div>}
     </main>

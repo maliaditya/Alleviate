@@ -36,7 +36,7 @@ function scheduleActionUrl(object: string, action: { id: string; name: string; d
 function readEvents(): CalendarEvent[] {
   try {
     const value = JSON.parse(localStorage.getItem(EVENTS_KEY) || "[]");
-    return Array.isArray(value) ? value.filter((event) => event && typeof event.id === "string" && typeof event.title === "string" && typeof event.date === "string") : [];
+    return Array.isArray(value) ? value.filter((event) => event && typeof event.id === "string" && typeof event.title === "string" && typeof event.date === "string").map((event) => ({ ...event, time: typeof event.time === "string" ? event.time : "", note: typeof event.note === "string" ? event.note : "" })) : [];
   } catch { return []; }
 }
 function readReadings(): ReadingEvent[] {
@@ -60,7 +60,7 @@ export default function CalendarPage() {
   const [readings, setReadings] = useState<ReadingEvent[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
-  const [view, setView] = useState<"month" | "week" | "day" | "agenda" | "multi-day">("week");
+  const [view, setView] = useState<"year" | "month" | "week" | "day" | "agenda" | "multi-day">("week");
   const [dayStartHour, setDayStartHour] = useState(7);
   const [title, setTitle] = useState("");
   const [time, setTime] = useState("");
@@ -163,7 +163,9 @@ export default function CalendarPage() {
   const multiDays = Array.from({ length: 3 }, (_, index) => new Date(selectedDay.getFullYear(), selectedDay.getMonth(), selectedDay.getDate() + index));
   const timeViewDays = view === "week" ? weekDays : view === "multi-day" ? multiDays : [selectedDay];
   const shownDays = view === "agenda" ? days.filter((day) => day.getMonth() === month.getMonth()) : timeViewDays;
-  const calendarTitle = view === "month" || view === "agenda"
+  const calendarTitle = view === "year"
+    ? String(month.getFullYear())
+    : view === "month" || view === "agenda"
     ? month.toLocaleDateString(undefined, { month: "long", year: "numeric" })
     : view === "day"
       ? selectedDay.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" })
@@ -223,6 +225,15 @@ export default function CalendarPage() {
   }
   function moveCalendar(offset: number) {
     if (view === "month" || view === "agenda") { moveMonth(offset); return; }
+    if (view === "year") {
+      const year = month.getFullYear() + offset;
+      const selectedDay = Number(selectedDate.slice(-2)) || 1;
+      const selectedMonth = Number(selectedDate.slice(5, 7)) - 1;
+      const lastDay = new Date(year, selectedMonth + 1, 0).getDate();
+      setMonth(new Date(year, month.getMonth(), 1));
+      setSelectedDate(dateKey(new Date(year, selectedMonth, Math.min(selectedDay, lastDay))));
+      return;
+    }
     const next = new Date(selectedDay.getFullYear(), selectedDay.getMonth(), selectedDay.getDate() + offset * (view === "week" ? 7 : view === "multi-day" ? 3 : 1));
     setSelectedDate(dateKey(next));
     setMonth(new Date(next.getFullYear(), next.getMonth(), 1));
@@ -276,7 +287,7 @@ export default function CalendarPage() {
           <div className="calendar-month-title"><CalendarDays size={20} /><h1>{calendarTitle}</h1></div>
           <div className="calendar-top-controls">
             <button className="calendar-add-event-button" aria-label="Add event" title="Add event" onClick={() => { resetEventForm(); setShowForm(true); }}><Plus size={19} /></button>
-            <label className="calendar-view-select-label"><span className="sr-only">Calendar view</span><select className="calendar-view-select" value={view} onChange={(event) => setView(event.target.value as typeof view)}><option value="month">Month</option><option value="week">Week</option><option value="day">Day</option><option value="agenda">Agenda</option><option value="multi-day">3 days</option></select><ChevronDown size={14} /></label>
+            <label className="calendar-view-select-label"><span className="sr-only">Calendar view</span><select className="calendar-view-select" value={view} onChange={(event) => setView(event.target.value as typeof view)}><option value="year">Year</option><option value="month">Month</option><option value="week">Week</option><option value="day">Day</option><option value="agenda">Agenda</option><option value="multi-day">3 days</option></select><ChevronDown size={14} /></label>
             {(view === "week" || view === "day" || view === "multi-day") && <label className="calendar-day-start-select"><span>Day starts</span><select aria-label="Day starts" value={dayStartHour} onChange={(event) => { const value = Number(event.target.value); setDayStartHour(value); try { localStorage.setItem(DAY_START_KEY, String(value)); } catch { /* Keep the chosen start time for this session. */ } }}>{Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{new Date(2000, 0, 1, hour).toLocaleTimeString(undefined, { hour: "numeric" })}</option>)}</select><ChevronDown size={13} /></label>}
             <div className="calendar-month-controls"><button className="icon-btn" aria-label={`Previous ${view}`} onClick={() => moveCalendar(-1)}><ChevronLeft size={17} /></button><button className="calendar-today-btn" onClick={() => { const today = new Date(); setMonth(new Date(today.getFullYear(), today.getMonth(), 1)); setSelectedDate(dateKey(today)); }}>Today</button><button className="icon-btn" aria-label={`Next ${view}`} onClick={() => moveCalendar(1)}><ChevronRight size={17} /></button></div>
           </div>
@@ -285,7 +296,7 @@ export default function CalendarPage() {
           <div className="calendar-month-weekdays">{"Sun Mon Tue Wed Thu Fri Sat".split(" ").map((day) => <span key={day}>{day}</span>)}</div>
           <div className="calendar-month-grid" style={{ gridTemplateRows: `repeat(${days.length / 7}, minmax(0, 1fr))` }}>{days.map((day) => {
             const key = dateKey(day);
-            const dayEvents = events.filter((event) => eventOccursOnDate(event, key)).sort((a, b) => a.time.localeCompare(b.time));
+            const dayEvents = events.filter((event) => eventOccursOnDate(event, key)).sort((a, b) => (a.time || "").localeCompare(b.time || ""));
             const dayReadings = readings.filter((reading) => reading.date === key);
             const isToday = key === dateKey(new Date());
             return <article key={key} className={`calendar-month-day ${day.getMonth() !== month.getMonth() ? "is-outside" : ""} ${key === selectedDate ? "is-selected" : ""}`} onClick={() => selectMonthDay(day)}>
@@ -297,6 +308,33 @@ export default function CalendarPage() {
               <button className="calendar-day-add" aria-label={`Add event on ${key}`} onClick={(click) => { click.stopPropagation(); resetEventForm(); selectMonthDay(day); setShowForm(true); }}><Plus size={14} /></button>
             </article>;
           })}</div>
+        </section>}
+        {view === "year" && <section className="calendar-year-view" aria-label={`${month.getFullYear()} calendar`}>
+          {Array.from({ length: 12 }, (_, monthIndex) => {
+            const year = month.getFullYear();
+            const firstDay = new Date(year, monthIndex, 1).getDay();
+            const dayCount = new Date(year, monthIndex + 1, 0).getDate();
+            const cellCount = Math.ceil((firstDay + dayCount) / 7) * 7;
+            const monthDate = new Date(year, monthIndex, 1);
+            return <article className="calendar-year-month" key={`${year}-${monthIndex}`}>
+              <button type="button" className="calendar-year-month-title" onClick={() => {
+                const selectedDay = Number(selectedDate.slice(-2)) || 1;
+                const lastDay = new Date(year, monthIndex + 1, 0).getDate();
+                setMonth(monthDate);
+                setSelectedDate(dateKey(new Date(year, monthIndex, Math.min(selectedDay, lastDay))));
+                setView("month");
+              }}>{monthDate.toLocaleDateString(undefined, { month: "long" })}</button>
+              <div className="calendar-year-weekdays" aria-hidden="true">{"SMTWTFS".split("").map((day, index) => <span key={`${day}-${index}`}>{day}</span>)}</div>
+              <div className="calendar-year-days">{Array.from({ length: cellCount }, (_, slot) => {
+                const dayNumber = slot - firstDay + 1;
+                if (dayNumber < 1 || dayNumber > dayCount) return <span className="is-empty" key={slot} />;
+                const day = new Date(year, monthIndex, dayNumber);
+                const key = dateKey(day);
+                const hasItems = events.some((event) => eventOccursOnDate(event, key)) || readings.some((reading) => reading.date === key);
+                return <button type="button" key={key} className={`${key === dateKey(now) ? "is-today" : ""} ${key === selectedDate ? "is-selected" : ""} ${hasItems ? "has-items" : ""}`} aria-label={`${day.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" })}${hasItems ? ", has items" : ""}`} onClick={() => { selectMonthDay(day); setView("month"); }}>{dayNumber}</button>;
+              })}</div>
+            </article>;
+          })}
         </section>}
         {(view === "week" || view === "day" || view === "multi-day") && <section className={`calendar-time-view ${view === "multi-day" ? "is-multi-day" : ""}`} aria-label={`${view} calendar`}>
           <div className="calendar-time-header"><div className="calendar-time-gutter" />{timeViewDays.map((day) => <button key={dateKey(day)} className={`calendar-time-day-heading ${dateKey(day) === dateKey(new Date()) ? "is-today" : ""}`} onClick={() => { setSelectedDate(dateKey(day)); setView("day"); }}><span>{day.toLocaleDateString(undefined, { weekday: "short" })}</span><strong>{day.getDate()}</strong></button>)}</div>
@@ -321,7 +359,7 @@ export default function CalendarPage() {
         </section>}
         <nav className="calendar-bottom-switcher" aria-label="Calendar view navigation">
           <div className="calendar-bottom-view-buttons">
-            <button disabled title="Premium view">Year</button>
+            <button className={view === "year" ? "is-active" : ""} aria-pressed={view === "year"} onClick={() => setView("year")}>Year</button>
             {(["month", "week", "day", "agenda", "multi-day"] as const).map((option) => <button key={option} className={view === option ? "is-active" : ""} aria-pressed={view === option} onClick={() => setView(option)}>{option === "multi-day" ? "Multi-Day" : option[0].toUpperCase() + option.slice(1)}</button>)}
           </div>
         </nav>

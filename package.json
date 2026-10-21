@@ -2,6 +2,9 @@
   "name": "alleviate-canvas",
   "version": "0.1.1",
   "private": true,
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "sync:excalidraw-assets": "node scripts/sync-excalidraw-assets.cjs",
     "predev": "npm run sync:excalidraw-assets",
