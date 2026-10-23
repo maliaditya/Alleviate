@@ -5,6 +5,7 @@ import { CalendarDays, CalendarPlus, Check, CalendarRange, ChevronDown, ChevronR
 import AppSidebar from "../AppSidebar";
 import { useAppDialogs } from "../AppDialogs";
 import FeedbackLoopCard, { EMPTY_LOOP, type Loop } from "../feedback-loop/FeedbackLoopCard";
+import { taskScheduleNote, taskScheduleSummary } from "../../lib/taskScheduleSummary";
 
 const EVENTS_KEY = "alleviate-calendar-events-v1";
 const OBJECTS_KEY = "alleviate-resources-default-objects";
@@ -27,38 +28,12 @@ function occursOn(task: Task, day: string) {
   const daysApart = Math.round((localDate(day).getTime() - localDate(task.date).getTime()) / 86400000);
   return daysApart >= 0 && daysApart % Math.max(1, task.repeat.interval || 1) === 0;
 }
-function scheduleFrequency(task: Task) {
-  if (!task.repeat) return "Once";
-  const interval = Math.max(1, task.repeat.interval || 1);
-  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const skipped = [...new Set(task.repeat.skipWeekdays || [])].filter((day) => Number.isInteger(day) && day >= 0 && day < 7).sort((a, b) => a - b).map((day) => weekdays[day]);
-  return interval === 1 ? `${7 - skipped.length} days a week` : `Every ${interval} days`;
-}
-function taskTimeRange(task: Task) {
-  if (!task.time) return "All day";
-  const format = (value: string) => {
-    const [hours, minutes] = value.split(":").map(Number);
-    return new Date(2000, 0, 1, hours || 0, minutes || 0).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-  };
-  return task.endTime ? `${format(task.time)} – ${format(task.endTime)}` : format(task.time);
-}
 function addMinutesToTime(value: string, minutes: number) {
   const [hours, mins] = value.split(":").map(Number);
   const total = ((hours * 60 + mins + minutes) % 1440 + 1440) % 1440;
   return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
 }
-function taskMetadata(task: Task) {
-  const loop = task.feedbackAction?.object?.trim();
-  let note = task.note?.trim() || "";
-  if (loop) {
-    const prefix = `Feedback loop · ${loop}`;
-    if (note.toLocaleLowerCase() === prefix.toLocaleLowerCase()) note = "";
-    else if (note.toLocaleLowerCase().startsWith(prefix.toLocaleLowerCase())) note = note.slice(prefix.length).replace(/^\s*(?:—|·)\s*/, "");
-  }
-  if (task.repeat) note = note.replace(/^(?:\d+\s+days?\s+(?:a week|per week)|\d+\s+days?\/week|every\s+day)(?:\s*[|·—,]\s*|\s+)?/i, "");
-  const skipped = [...new Set(task.repeat?.skipWeekdays || [])].filter((day) => Number.isInteger(day) && day >= 0 && day < 7).sort((a, b) => a - b).map((day) => ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][day]);
-  return [loop, task.repeat && scheduleFrequency(task), skipped.length ? `Skips: ${skipped.join(", ")}` : undefined, task.time && taskTimeRange(task), note || undefined].filter(Boolean) as string[];
-}
+function taskMetadata(task: Task) { return taskScheduleSummary(task); }
 function readObjectHierarchy(objects: string[]): ObjectTopic[] {
   const names = new Set(objects.map((name) => name.trim().toLocaleLowerCase()));
   try {
@@ -141,20 +116,40 @@ export default function TaskListPage() {
       } catch { setScheduledQuadrants({}); }
     };
     const refreshLists = () => {
+      let savedLoops: Record<string, Loop> = {};
+      try {
+        const saved = JSON.parse(localStorage.getItem(LOOPS_KEY) || "{}");
+        savedLoops = saved && typeof saved === "object" && !Array.isArray(saved)
+          ? Object.fromEntries(Object.entries(saved).map(([key, value]) => [key, { ...EMPTY_LOOP, ...(value as Partial<Loop>), readings: (value as Partial<Loop>).readings || [], versions: (value as Partial<Loop>).versions || [], inputs: (value as Partial<Loop>).inputs || [], actions: (value as Partial<Loop>).actions || [] }]))
+          : {};
+        setLoops(savedLoops);
+      } catch { setLoops({}); }
       try {
         const rawObjects = localStorage.getItem(OBJECTS_KEY) ?? localStorage.getItem(LEGACY_OBJECTS_KEY);
         const parsedObjects = rawObjects ? JSON.parse(rawObjects) : [];
-        const nextObjects = Array.isArray(parsedObjects) ? Array.from(new Set(parsedObjects.filter((name): name is string => typeof name === "string" && Boolean(name.trim())).map((name) => name.trim()))) : [];
+        const savedObjects = Array.isArray(parsedObjects) ? Array.from(new Set(parsedObjects.filter((name): name is string => typeof name === "string" && Boolean(name.trim())).map((name) => name.trim()))) : [];
+        const nextObjects = savedObjects.filter((name) => (savedLoops[name.trim().toLocaleLowerCase()]?.actions || []).some((action) => Boolean(action.name?.trim() || action.details?.trim())));
+        if (nextObjects.length !== savedObjects.length) {
+          localStorage.setItem(OBJECTS_KEY, JSON.stringify(nextObjects));
+          localStorage.setItem(LEGACY_OBJECTS_KEY, JSON.stringify(nextObjects));
+          const rawIds = JSON.parse(localStorage.getItem(OBJECT_IDS_KEY) || "{}");
+          const ids: Record<string, string> = rawIds && typeof rawIds === "object" && !Array.isArray(rawIds) ? rawIds : {};
+          const activeKeys = new Set(nextObjects.map((name) => name.trim().toLocaleLowerCase()));
+          const removedIds = Object.entries(ids).filter(([key]) => !activeKeys.has(key)).map(([, id]) => id);
+          for (const [key] of Object.entries(ids)) if (!activeKeys.has(key)) delete ids[key];
+          localStorage.setItem(OBJECT_IDS_KEY, JSON.stringify(ids));
+          const xml = localStorage.getItem(OBJECT_XML_KEY);
+          if (xml && removedIds.length) {
+            const document = new DOMParser().parseFromString(xml, "text/xml");
+            if (!document.querySelector("parsererror")) {
+              for (const node of Array.from(document.querySelectorAll("topic"))) if (removedIds.includes(node.getAttribute("id") || "")) node.removeAttribute("shape");
+              localStorage.setItem(OBJECT_XML_KEY, new XMLSerializer().serializeToString(document));
+            }
+          }
+        }
         setObjects(nextObjects);
         setObjectHierarchy(readObjectHierarchy(nextObjects));
       } catch { setObjects([]); }
-      try {
-        const saved = JSON.parse(localStorage.getItem(LOOPS_KEY) || "{}");
-        setLoops(saved && typeof saved === "object" && !Array.isArray(saved)
-          ? Object.fromEntries(Object.entries(saved).map(([key, value]) => [key, { ...EMPTY_LOOP, ...(value as Partial<Loop>), readings: (value as Partial<Loop>).readings || [], versions: (value as Partial<Loop>).versions || [], inputs: (value as Partial<Loop>).inputs || [], actions: (value as Partial<Loop>).actions || [] }]))
-          : {});
-      }
-      catch { setLoops({}); }
     };
     refresh();
     refreshQuadrants();
@@ -183,7 +178,7 @@ export default function TaskListPage() {
   const visible = (view === "today" ? todayTasks : view === "next" ? nextTasks : tasks).filter((task) => showCompleted || !task.completedDates?.includes(today));
   const selected = visible.find((task) => task.id === selectedId) || visible[0];
   const taskCheckboxStyle = (taskId?: string): CSSProperties => ({ "--task-quadrant-color": QUADRANT_COLORS[taskId ? scheduledQuadrants[taskId] || "eliminate" : "eliminate"] || QUADRANT_COLORS.eliminate } as CSSProperties);
-  const promoteTopicToObject = (name: string) => {
+  const syncObjectMembership = (name: string, hasTask: boolean) => {
     const findTopic = (topics: ObjectTopic[]): ObjectTopic | undefined => {
       for (const topic of topics) {
         if (topic.text.trim().toLocaleLowerCase() === name.trim().toLocaleLowerCase()) return topic;
@@ -193,20 +188,27 @@ export default function TaskListPage() {
       return undefined;
     };
     const topic = findTopic(objectHierarchy);
-    // Keep the central “You” node as the map root; every other selected hierarchy
-    // node becomes an object once it has an action.
-    if (!topic || topic.id === objectHierarchy[0]?.id || topic.isObject) return;
-    const nextObjects = objects.some((object) => object.trim().toLocaleLowerCase() === topic.text.trim().toLocaleLowerCase()) ? objects : [...objects, topic.text];
+    // Keep the central “You” node as the map root. Other nodes enter the Object
+    // list only while they have at least one named task.
+    if (!topic || topic.id === objectHierarchy[0]?.id) return;
+    const objectKey = topic.text.trim().toLocaleLowerCase();
+    const wasObject = objects.some((object) => object.trim().toLocaleLowerCase() === objectKey);
+    const nextObjects = hasTask
+      ? wasObject ? objects : [...objects, topic.text]
+      : objects.filter((object) => object.trim().toLocaleLowerCase() !== objectKey);
+    if (wasObject === hasTask && nextObjects.length === objects.length) return;
     try {
       const rawIds = JSON.parse(localStorage.getItem(OBJECT_IDS_KEY) || "{}");
       const objectIds: Record<string, string> = rawIds && typeof rawIds === "object" && !Array.isArray(rawIds) ? rawIds : {};
-      objectIds[topic.text.trim().toLocaleLowerCase()] = topic.id;
+      if (hasTask) objectIds[objectKey] = topic.id;
+      else delete objectIds[objectKey];
       const xml = localStorage.getItem(OBJECT_XML_KEY);
       if (xml) {
         const document = new DOMParser().parseFromString(xml, "text/xml");
         const node = Array.from(document.querySelectorAll("topic")).find((item) => item.getAttribute("id") === topic.id);
         if (node && !document.querySelector("parsererror")) {
-          node.setAttribute("shape", "rounded rectangle");
+          if (hasTask) node.setAttribute("shape", "rounded rectangle");
+          else node.removeAttribute("shape");
           localStorage.setItem(OBJECT_XML_KEY, new XMLSerializer().serializeToString(document));
         }
       }
@@ -221,11 +223,9 @@ export default function TaskListPage() {
   const addTask = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); const title = draft.trim(); if (!title) return;
     if (selectedObject) {
-      promoteTopicToObject(selectedObject);
       const key = selectedObject.trim().toLocaleLowerCase();
-      const next = { ...loops, [key]: { ...loops[key], actions: [...(loops[key]?.actions || []), { id: crypto.randomUUID(), name: title, details: "", inputId: "", complete: false }] } };
-      setLoops(next);
-      try { localStorage.setItem(LOOPS_KEY, JSON.stringify(next)); window.dispatchEvent(new Event("feedback-loops-updated")); } catch { /* Keep the action list usable if storage is unavailable. */ }
+      const current = { ...EMPTY_LOOP, ...loops[key] };
+      updateObjectLoop(selectedObject, { actions: [...current.actions, { id: crypto.randomUUID(), name: title, details: "", inputId: "", complete: false }] });
       setDraft("");
       return;
     }
@@ -312,6 +312,7 @@ export default function TaskListPage() {
     const next = { ...loops, [key]: { ...EMPTY_LOOP, ...loops[key], ...patch } };
     setLoops(next);
     try { localStorage.setItem(LOOPS_KEY, JSON.stringify(next)); window.dispatchEvent(new Event("feedback-loops-updated")); } catch { /* Keep the feedback loop usable if storage is unavailable. */ }
+    syncObjectMembership(object, next[key].actions.some((action) => Boolean(action.name?.trim() || action.details?.trim())));
   };
   const startInlineActionEdit = (object: string, action: LinkedAction) => {
     setInlineActionName(action.name || "");
@@ -374,13 +375,16 @@ export default function TaskListPage() {
     window.dispatchEvent(new Event("resources-mindmap-updated"));
   };
   const addObjectUnder = async (parent: ObjectTopic) => {
-    const name = (await dialogs.prompt({ title: "Add object", message: `Add an object under ${parent.text}`, confirmLabel: "Add" }))?.trim();
+    const name = (await dialogs.prompt({ title: "Add child node", message: `Add a child node under ${parent.text}`, confirmLabel: "Add" }))?.trim();
     if (!name) return;
-    if (objects.some((object) => object.toLocaleLowerCase() === name.toLocaleLowerCase())) {
-      await dialogs.alert({ title: "Object already exists", message: `“${name}” already exists in your object list.` });
+    const findTopic = (topics: ObjectTopic[]): ObjectTopic | undefined => {
+      for (const topic of topics) { if (topic.text.trim().toLocaleLowerCase() === name.toLocaleLowerCase()) return topic; const nested = findTopic(topic.children); if (nested) return nested; }
+      return undefined;
+    };
+    if (findTopic(objectHierarchy)) {
+      await dialogs.alert({ title: "Node already exists", message: `“${name}” already exists in this hierarchy.` });
       return;
     }
-    const nextObjects = [...objects, name];
     try {
       const idMapValue = JSON.parse(localStorage.getItem(OBJECT_IDS_KEY) || "{}");
       const objectIds: Record<string, string> = idMapValue && typeof idMapValue === "object" && !Array.isArray(idMapValue) ? idMapValue : {};
@@ -413,19 +417,14 @@ export default function TaskListPage() {
           const child = document.createElement("topic");
           child.setAttribute("id", String(nextId));
           child.setAttribute("order", String(Array.from(parentNode.children).filter((item) => item.tagName.toLocaleLowerCase() === "topic").length));
-          child.setAttribute("shape", "rounded rectangle");
           child.setAttribute("text", name);
           parentNode.appendChild(child);
-          objectIds[name.toLocaleLowerCase()] = String(nextId);
         }
       }
       localStorage.setItem(OBJECT_IDS_KEY, JSON.stringify(objectIds));
       localStorage.setItem(OBJECT_XML_KEY, new XMLSerializer().serializeToString(document));
-      localStorage.setItem(OBJECTS_KEY, JSON.stringify(nextObjects));
-      localStorage.setItem(LEGACY_OBJECTS_KEY, JSON.stringify(nextObjects));
     } catch { /* Keep the hierarchy available in this session if browser storage is unavailable. */ }
-    setObjects(nextObjects);
-    setObjectHierarchy(readObjectHierarchy(nextObjects));
+    setObjectHierarchy(readObjectHierarchy(objects));
     setSelectedObject(name);
     setSelectedAction(null);
     window.dispatchEvent(new Event("resources-mindmap-updated"));
@@ -493,11 +492,12 @@ export default function TaskListPage() {
                 {objectActions.length ? objectActions.map((action) => {
                   const factor = loops[selectedObject.trim().toLocaleLowerCase()]?.inputs.find((input) => input.id === action.inputId);
                   const linkedSchedule = [...tasks].reverse().find((task) => task.feedbackAction?.object.trim().toLocaleLowerCase() === selectedObject.trim().toLocaleLowerCase() && task.feedbackAction.actionId === action.id);
-                  const actionMetadata = linkedSchedule ? taskMetadata(linkedSchedule) : action.details ? [action.details] : [];
+                  const actionMetadata = linkedSchedule ? taskMetadata(linkedSchedule) : [];
+                  const actionNote = linkedSchedule ? taskScheduleNote(linkedSchedule) : action.details || "";
                   return <div className={`task-action-item ${factorPickerActionId === action.id ? "has-factor-picker" : ""}`} key={action.id}>
                     <article onClick={() => setSelectedAction({ object: selectedObject, action })} className={`today-task-row ${action.complete ? "is-complete" : ""} ${selectedAction?.action.id === action.id ? "is-selected" : ""}`}>
                       <button type="button" className="today-task-check" style={taskCheckboxStyle(linkedSchedule?.id)} onClick={(event) => { event.stopPropagation(); toggleAction(selectedObject, action); setSelectedAction({ object: selectedObject, action: { ...action, complete: !action.complete, completedDate: !action.complete ? today : undefined } }); }} aria-label={action.complete ? `Mark ${action.name || action.details} incomplete` : `Mark ${action.name || action.details} complete`}>{action.complete && <Check size={14} />}</button>
-                      <div className="today-task-copy">{inlineActionEdit?.object.toLocaleLowerCase() === selectedObject.toLocaleLowerCase() && inlineActionEdit.actionId === action.id ? <input ref={inlineActionInputRef} className="task-inline-action-name" aria-label="Task name" value={inlineActionName} onChange={(event) => setInlineActionName(event.target.value)} onBlur={commitInlineActionEdit} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitInlineActionEdit(); } if (event.key === "Escape") setInlineActionEdit(null); }} /> : <strong title="Double-click to edit task name" onDoubleClick={(event) => { event.stopPropagation(); startInlineActionEdit(selectedObject, action); }}>{action.name || action.details}</strong>}<small className="task-action-meta">{actionMetadata.map((detail, index) => <span key={`${detail}-${index}`}>{detail}</span>)}{factor && <span>{factor.name}: {factor.value || "value not set"}</span>}</small></div>
+                      <div className="today-task-copy">{inlineActionEdit?.object.toLocaleLowerCase() === selectedObject.toLocaleLowerCase() && inlineActionEdit.actionId === action.id ? <input ref={inlineActionInputRef} className="task-inline-action-name" aria-label="Task name" value={inlineActionName} onChange={(event) => setInlineActionName(event.target.value)} onBlur={commitInlineActionEdit} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitInlineActionEdit(); } if (event.key === "Escape") setInlineActionEdit(null); }} /> : <strong title="Double-click to edit task name" onDoubleClick={(event) => { event.stopPropagation(); startInlineActionEdit(selectedObject, action); }}>{action.name || action.details}</strong>}<small className="task-action-meta">{actionMetadata.map((detail, index) => <span key={`${detail}-${index}`}>{detail}</span>)}</small>{factor && <small className="task-action-note">{factor.name}: {factor.value || "value not set"}</small>}{actionNote && <small className="task-action-note">{actionNote}</small>}</div>
                       <div className="task-row-tools">
                         <button type="button" className="task-row-icon" title="Schedule action" aria-label={`Schedule ${action.name || "action"}`} onClick={(event) => { event.stopPropagation(); openSchedule({ title: action.name || action.details || "Feedback action", note: [selectedObject && `Feedback loop · ${selectedObject}`, action.details].filter(Boolean).join(" — "), feedbackAction: { object: selectedObject, actionId: action.id }, existing: linkedSchedule }); }}><CalendarPlus size={15} /></button>
                         <button type="button" className="task-row-icon" title="Choose the factor this action influences" aria-label={`Choose factor for ${action.name || "action"}`} aria-expanded={factorPickerActionId === action.id} onClick={(event) => { event.stopPropagation(); setFactorPickerActionId((current) => current === action.id ? null : action.id); }}><Wrench size={14} /></button>
@@ -514,7 +514,7 @@ export default function TaskListPage() {
                 {visible.length ? visible.map((task) => (
                   <article key={task.id} onClick={() => { setSelectedId(task.id); setSelectedObject(null); setSelectedAction(null); }} className={`today-task-row ${task.completedDates?.includes(today) ? "is-complete" : ""} ${selected?.id === task.id && !selectedAction ? "is-selected" : ""}`}>
                     <button type="button" className="today-task-check" style={taskCheckboxStyle(task.id)} onClick={(event) => { event.stopPropagation(); toggle(task); }} aria-label={`Toggle ${task.title}`}>{task.completedDates?.includes(today) && <Check size={14} />}</button>
-                    <div className="today-task-copy"><strong>{task.title}</strong><small className="task-action-meta">{taskMetadata(task).map((detail, index) => <span key={`${detail}-${index}`}>{detail}</span>)}</small></div>
+                    <div className="today-task-copy"><strong>{task.title}</strong><small className="task-action-meta">{taskMetadata(task).map((detail, index) => <span key={`${detail}-${index}`}>{detail}</span>)}</small>{taskScheduleNote(task) && <small className="task-action-note">{taskScheduleNote(task)}</small>}</div>
                     <span className="today-task-time">{task.date}</span>
                     <div className="task-row-tools"><button type="button" className="task-row-icon" title="Schedule task" aria-label={`Schedule ${task.title}`} onClick={(event) => { event.stopPropagation(); openSchedule({ title: task.title, note: task.note, existing: task }); }}><CalendarPlus size={15} /></button><button type="button" className="today-task-delete" onClick={(event) => { event.stopPropagation(); remove(task); }} aria-label={`Delete ${task.title}`}><Trash2 size={14} /></button></div>
                   </article>
@@ -525,7 +525,7 @@ export default function TaskListPage() {
         </section>
         <aside className={`tasks-detail ${selectedObject ? "object-loop-detail" : ""}`}>
           {selectedObject ? (
-            <FeedbackLoopCard key={selectedObject.toLocaleLowerCase()} compact name={selectedObject} loop={loops[selectedObject.trim().toLocaleLowerCase()] || EMPTY_LOOP} onUpdate={(patch) => updateObjectLoop(selectedObject, patch)} />
+            <FeedbackLoopCard key={selectedObject.toLocaleLowerCase()} compact name={selectedObject} loop={loops[selectedObject.trim().toLocaleLowerCase()] || EMPTY_LOOP} schedules={tasks.filter((task): task is Task & { feedbackAction: { object: string; actionId: string } } => Boolean(task.feedbackAction?.object && task.feedbackAction.actionId))} onUpdate={(patch) => updateObjectLoop(selectedObject, patch)} />
           ) : selectedAction ? (
             <>
               <header><button className="detail-check" style={taskCheckboxStyle(selectedActionSchedule?.id)} onClick={() => { toggleAction(selectedAction.object, selectedAction.action); setSelectedAction((current) => current ? { ...current, action: { ...current.action, complete: !current.action.complete, completedDate: !current.action.complete ? today : undefined } } : null); }}>{selectedAction.action.complete && <Check size={13} />}</button><span className="detail-date">{selectedAction.object}</span></header>
@@ -542,9 +542,9 @@ export default function TaskListPage() {
         </aside>
       </div>
       {scheduleTarget && <div className="calendar-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setScheduleTarget(null); }}><form className="calendar-event-modal task-schedule-modal" onSubmit={saveSchedule}>
-        <header><div><span>{scheduleTarget.feedbackAction ? `FEEDBACK ACTION · ${scheduleTarget.feedbackAction.object}` : "TASK SCHEDULE"}</span><h2>Schedule task</h2></div><button type="button" className="icon-btn" aria-label="Close schedule" onClick={() => setScheduleTarget(null)}><X size={17} /></button></header>
-        <label>Title<input required maxLength={100} value={scheduleTarget.title} onChange={(event) => setScheduleTarget((current) => current ? { ...current, title: event.target.value } : current)} /></label>
-        <div className="calendar-modal-row calendar-modal-date-row"> <label>Date<input type="date" value={scheduleDate} onChange={(event) => setScheduleDate(event.target.value)} required /></label>{!scheduleAllDay && <><label>Start<input type="time" value={scheduleStart} onChange={(event) => { const nextStart = event.target.value; setScheduleStart(nextStart); if (nextStart) setScheduleEnd(addMinutesToTime(nextStart, 60)); }} /></label><label>End<input type="time" value={scheduleEnd} onChange={(event) => setScheduleEnd(event.target.value)} /></label></>}</div>
+        <header><div><span>TASK SCHEDULE</span><h2>{scheduleTarget.existingId ? "Edit schedule" : "Schedule task"}</h2></div><button type="button" className="icon-btn" aria-label="Close schedule" onClick={() => setScheduleTarget(null)}><X size={17} /></button></header>
+        <label>Title<input autoFocus required maxLength={100} value={scheduleTarget.title} onChange={(event) => setScheduleTarget((current) => current ? { ...current, title: event.target.value } : current)} placeholder="What are you planning?" /></label>
+        <div className={`calendar-modal-row calendar-modal-date-row ${scheduleAllDay ? "is-all-day" : ""}`}><label>Date<input type="date" value={scheduleDate} onChange={(event) => setScheduleDate(event.target.value)} required /></label>{!scheduleAllDay && <><label>Start<input type="time" value={scheduleStart} onChange={(event) => { const nextStart = event.target.value; setScheduleStart(nextStart); if (nextStart) setScheduleEnd(addMinutesToTime(nextStart, 60)); }} /></label><label>End<input type="time" value={scheduleEnd} onChange={(event) => setScheduleEnd(event.target.value)} /></label></>}</div>
         <label>Note<input maxLength={240} value={scheduleTarget.note} onChange={(event) => setScheduleTarget((current) => current ? { ...current, note: event.target.value } : current)} placeholder="Optional details" /></label>
         <fieldset className="calendar-repeat-fieldset"><legend>Repeat</legend>
           <div className="calendar-modal-row calendar-repeat-frequency-row"><label>Frequency<select value={scheduleRepeat} onChange={(event) => { setScheduleRepeat(event.target.value as typeof scheduleRepeat); if (event.target.value === "none") setScheduleExceptOpen(false); }}><option value="none">Does not repeat</option><option value="daily">Every day</option><option value="custom">Custom interval</option></select></label>
@@ -553,7 +553,7 @@ export default function TaskListPage() {
           </div>
           {scheduleRepeat !== "none" && <div className="calendar-modal-row calendar-repeat-end"><label>Until (optional)<input type="date" min={scheduleDate} value={scheduleUntil} onChange={(event) => setScheduleUntil(event.target.value)} /></label></div>}
         </fieldset>
-        <footer><label className="calendar-all-day-toggle"><input type="checkbox" checked={scheduleAllDay} onChange={(event) => setScheduleAllDay(event.target.checked)} />All day</label><div className="calendar-modal-footer-actions"><button type="button" className="calendar-today-btn" onClick={() => setScheduleTarget(null)}>Cancel</button><button className="primary-btn" type="submit"><CalendarPlus size={15} /> Save schedule</button></div></footer>
+        <footer><label className="calendar-all-day-toggle"><input type="checkbox" checked={scheduleAllDay} onChange={(event) => setScheduleAllDay(event.target.checked)} />All day</label><div className="calendar-modal-footer-actions"><button type="button" className="calendar-today-btn" onClick={() => setScheduleTarget(null)}>Cancel</button><button className="primary-btn" type="submit"><CalendarPlus size={15} /> {scheduleTarget.existingId ? "Save changes" : "Save schedule"}</button></div></footer>
       </form></div>}
     </main>
   );

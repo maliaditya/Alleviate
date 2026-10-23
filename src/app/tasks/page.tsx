@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { CalendarDays, Check, CheckSquare, Clock3, Repeat2, Trash2, Inbox, CalendarRange, List, Search, MoreHorizontal, ChevronDown, ArrowLeft, ArrowRight } from "lucide-react";
+import { CalendarDays, Check, CheckSquare, Repeat2, Trash2, Inbox, CalendarRange, List, Search, MoreHorizontal, ChevronDown, ArrowLeft, ArrowRight } from "lucide-react";
 import AppSidebar from "../AppSidebar";
 import { useAppDialogs } from "../AppDialogs";
+import { taskScheduleNote, taskScheduleSummary } from "../../lib/taskScheduleSummary";
 
 const EVENTS_KEY = "alleviate-calendar-events-v1";
 const FEEDBACK_LOOPS_KEY = "alleviate-feedback-loops-v1";
@@ -16,11 +17,6 @@ type NeedLoop = { actions?: NeedAction[] };
 type NeedsTab = "objects" | "today" | "all";
 const dateKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 const localDate = (value: string) => new Date(`${value}T12:00:00`);
-const formatTime = (value?: string) => {
-  if (!value) return "All day";
-  const [hours, minutes] = value.split(":").map(Number);
-  return new Date(2000, 0, 1, hours || 0, minutes || 0).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-};
 function occursOn(task: CalendarTask, day: string) {
   if (day < task.date || (task.repeat?.until && day > task.repeat.until)) return false;
   if (task.repeat?.skipWeekdays?.includes(localDate(day).getDay())) return false;
@@ -33,18 +29,6 @@ function readTasks(): CalendarTask[] {
     const stored = JSON.parse(localStorage.getItem(EVENTS_KEY) || "[]");
     return Array.isArray(stored) ? stored.filter((task) => task && typeof task.id === "string" && typeof task.title === "string" && typeof task.date === "string") : [];
   } catch { return []; }
-}
-function taskSchedule(event: CalendarTask) {
-  if (!event.repeat) return "Once";
-  const interval = Math.max(1, event.repeat.interval || 1);
-  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const skipped = [...new Set(event.repeat.skipWeekdays || [])].filter((day) => Number.isInteger(day) && day >= 0 && day < 7).sort((a, b) => a - b).map((day) => weekdays[day]);
-  const frequency = interval === 1 ? `${7 - skipped.length} days/week` : `Every ${interval} days`;
-  return `${frequency}${skipped.length ? ` | Skips: ${skipped.join(",")}` : ""}${event.repeat.until ? ` · Until ${event.repeat.until}` : ""}`;
-}
-function taskTimeRange(event: CalendarTask) {
-  const start = formatTime(event.time);
-  return event.time && event.endTime ? `${start} – ${formatTime(event.endTime)}` : start;
 }
 function readObjects(): string[] {
   try {
@@ -189,10 +173,11 @@ export default function TasksPage() {
 
 function TaskRow({ event, today, onToggle, onDelete, selected, onSelect }: { event: CalendarTask; today: string; onToggle: (event: CalendarTask) => void; onDelete: (event: CalendarTask) => void; selected?: boolean; onSelect?: () => void }) {
   const isComplete = event.completedDates?.includes(today) || false;
+  const scheduleDetails = taskScheduleSummary(event).join(" | ");
+  const scheduleNote = taskScheduleNote(event);
   return <article onClick={onSelect} className={`today-task-row ${isComplete ? "is-complete" : ""} ${selected ? "is-selected" : ""}`}>
     <button type="button" className="today-task-check" onClick={() => onToggle(event)} aria-label={isComplete ? `Mark ${event.title} incomplete` : `Mark ${event.title} complete`}>{isComplete && <Check size={14} />}</button>
-    <div className="today-task-copy"><strong>{event.title}</strong>{event.note && <small>{event.note}</small>}<small className="today-task-details">{[event.feedbackAction?.object && `Feedback loop · ${event.feedbackAction.object}`, taskSchedule(event)].filter(Boolean).join(" · ")}</small></div>
-    <span className="today-task-time"><Clock3 size={13} />{taskTimeRange(event)}</span>
+    <div className="today-task-copy"><strong>{event.title}</strong><small className="today-task-details">{scheduleDetails}</small>{scheduleNote && <small>{scheduleNote}</small>}</div>
     <button type="button" className="today-task-delete" onClick={() => onDelete(event)} aria-label={`Delete ${event.title}`} title="Delete task"><Trash2 size={14} /></button>
   </article>;
 }

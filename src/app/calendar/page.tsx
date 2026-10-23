@@ -13,7 +13,8 @@ type ReadingEvent = { id: string; object: string; metric: string; value: number;
 function dateKey(date: Date) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`; }
 function parseDate(key: string) { return new Date(`${key}T12:00:00`); }
 function minuteOfDay(value: string) { const [hours, minutes] = value.split(":").map(Number); return (hours || 0) * 60 + (minutes || 0); }
-function formatClock(value: string) { if (!value) return ""; const [hours, minutes] = value.split(":").map(Number); return new Date(2000, 0, 1, hours || 0, minutes || 0).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }); }
+function formatHour(hour: number) { return `${hour % 12 || 12} ${hour < 12 ? "AM" : "PM"}`; }
+function formatClock(value: string) { if (!value) return ""; const [hours, minutes] = value.split(":").map(Number); const safeHour = hours || 0; return `${safeHour % 12 || 12}:${String(minutes || 0).padStart(2, "0")} ${safeHour < 12 ? "AM" : "PM"}`; }
 function nextHour(value: string) { if (!value) return ""; const date = new Date(2000, 0, 1, ...value.split(":").map(Number) as [number, number]); date.setHours(date.getHours() + 1); return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`; }
 function timeValue(minutes: number) { const safe = ((minutes % 1440) + 1440) % 1440; return `${String(Math.floor(safe / 60)).padStart(2, "0")}:${String(safe % 60).padStart(2, "0")}`; }
 function eventDuration(event: CalendarEvent) { if (!event.time) return 60; const start = minuteOfDay(event.time); const finish = event.endTime ? minuteOfDay(event.endTime) : start + 60; return Math.max(15, (finish <= start ? finish + 1440 : finish) - start); }
@@ -69,7 +70,6 @@ export default function CalendarPage() {
   const [note, setNote] = useState("");
   const [repeatMode, setRepeatMode] = useState<"none" | "daily" | "custom">("none");
   const [repeatInterval, setRepeatInterval] = useState(2);
-  const [repeatEndMode, setRepeatEndMode] = useState<"never" | "date">("never");
   const [repeatUntil, setRepeatUntil] = useState("");
   const [skipWeekdays, setSkipWeekdays] = useState<number[]>([]);
   const [exceptOpen, setExceptOpen] = useState(false);
@@ -186,7 +186,7 @@ export default function CalendarPage() {
 
   function saveEvent(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const repeat = repeatMode === "none" ? undefined : { interval: repeatMode === "daily" ? 1 : Math.max(1, Math.min(365, repeatInterval)), unit: "day" as const, ...(skipWeekdays.length ? { skipWeekdays } : {}), ...(repeatEndMode === "date" && repeatUntil >= selectedDate ? { until: repeatUntil } : {}) };
+    const repeat = repeatMode === "none" ? undefined : { interval: repeatMode === "daily" ? 1 : Math.max(1, Math.min(365, repeatInterval)), unit: "day" as const, ...(skipWeekdays.length ? { skipWeekdays } : {}), ...(repeatUntil && repeatUntil >= selectedDate ? { until: repeatUntil } : {}) };
     const existing = editingEventId ? events.find((item) => item.id === editingEventId) : undefined;
     const updated = { id: editingEventId || crypto.randomUUID(), title: title.trim(), date: selectedDate, time: allDay ? "" : time, endTime: allDay ? undefined : endTime || nextHour(time), note: note.trim(), color: existing?.color ?? Math.floor(Math.random() * 7), repeat, feedbackAction, completedDates: existing?.completedDates || [] };
     const next = editingEventId ? events.map((item) => item.id === editingEventId ? updated : item) : [...events, updated];
@@ -195,7 +195,7 @@ export default function CalendarPage() {
     resetEventForm();
   }
   function resetEventForm() {
-    setTitle(""); setTime(""); setEndTime(""); setAllDay(false); setNote(""); setRepeatMode("none"); setRepeatInterval(2); setRepeatEndMode("never"); setRepeatUntil(""); setSkipWeekdays([]); setExceptOpen(false); setFeedbackAction(undefined); setEditingEventId(null); setShowForm(false);
+    setTitle(""); setTime(""); setEndTime(""); setAllDay(false); setNote(""); setRepeatMode("none"); setRepeatInterval(2); setRepeatUntil(""); setSkipWeekdays([]); setExceptOpen(false); setFeedbackAction(undefined); setEditingEventId(null); setShowForm(false);
   }
   function editEvent(item: CalendarEvent) {
     setEditingEventId(item.id);
@@ -207,7 +207,6 @@ export default function CalendarPage() {
     setNote(item.note || "");
     setRepeatMode(item.repeat ? (item.repeat.interval === 1 ? "daily" : "custom") : "none");
     setRepeatInterval(item.repeat?.interval || 2);
-    setRepeatEndMode(item.repeat?.until ? "date" : "never");
     setRepeatUntil(item.repeat?.until || "");
     setSkipWeekdays(item.repeat?.skipWeekdays || []);
     setExceptOpen(false);
@@ -288,7 +287,7 @@ export default function CalendarPage() {
           <div className="calendar-top-controls">
             <button className="calendar-add-event-button" aria-label="Add event" title="Add event" onClick={() => { resetEventForm(); setShowForm(true); }}><Plus size={19} /></button>
             <label className="calendar-view-select-label"><span className="sr-only">Calendar view</span><select className="calendar-view-select" value={view} onChange={(event) => setView(event.target.value as typeof view)}><option value="year">Year</option><option value="month">Month</option><option value="week">Week</option><option value="day">Day</option><option value="agenda">Agenda</option><option value="multi-day">3 days</option></select><ChevronDown size={14} /></label>
-            {(view === "week" || view === "day" || view === "multi-day") && <label className="calendar-day-start-select"><span>Day starts</span><select aria-label="Day starts" value={dayStartHour} onChange={(event) => { const value = Number(event.target.value); setDayStartHour(value); try { localStorage.setItem(DAY_START_KEY, String(value)); } catch { /* Keep the chosen start time for this session. */ } }}>{Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{new Date(2000, 0, 1, hour).toLocaleTimeString(undefined, { hour: "numeric" })}</option>)}</select><ChevronDown size={13} /></label>}
+            {(view === "week" || view === "day" || view === "multi-day") && <label className="calendar-day-start-select"><span>Day starts</span><select aria-label="Day starts" value={dayStartHour} onChange={(event) => { const value = Number(event.target.value); setDayStartHour(value); try { localStorage.setItem(DAY_START_KEY, String(value)); } catch { /* Keep the chosen start time for this session. */ } }}>{Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{formatHour(hour)}</option>)}</select><ChevronDown size={13} /></label>}
             <div className="calendar-month-controls"><button className="icon-btn" aria-label={`Previous ${view}`} onClick={() => moveCalendar(-1)}><ChevronLeft size={17} /></button><button className="calendar-today-btn" onClick={() => { const today = new Date(); setMonth(new Date(today.getFullYear(), today.getMonth(), 1)); setSelectedDate(dateKey(today)); }}>Today</button><button className="icon-btn" aria-label={`Next ${view}`} onClick={() => moveCalendar(1)}><ChevronRight size={17} /></button></div>
           </div>
         </header>
@@ -363,20 +362,19 @@ export default function CalendarPage() {
             {(["month", "week", "day", "agenda", "multi-day"] as const).map((option) => <button key={option} className={view === option ? "is-active" : ""} aria-pressed={view === option} onClick={() => setView(option)}>{option === "multi-day" ? "Multi-Day" : option[0].toUpperCase() + option.slice(1)}</button>)}
           </div>
         </nav>
-        {showForm && <div className="calendar-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) resetEventForm(); }}><form className="calendar-event-modal" onSubmit={saveEvent}>
-          <header><div><span>{feedbackAction ? `FEEDBACK ACTION · ${feedbackAction.object}` : editingEventId ? "EDIT EVENT" : "NEW EVENT"}</span><h2>{editingEventId ? "Edit event" : "Add to calendar"}</h2></div><button type="button" className="icon-btn" aria-label="Close event form" onClick={resetEventForm}><X size={17} /></button></header>
+        {showForm && <div className="calendar-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) resetEventForm(); }}><form className="calendar-event-modal task-schedule-modal" onSubmit={saveEvent}>
+          <header><div><span>TASK SCHEDULE</span><h2>{editingEventId ? "Edit schedule" : "Schedule task"}</h2></div><button type="button" className="icon-btn" aria-label="Close schedule" onClick={resetEventForm}><X size={17} /></button></header>
           <label>Title<input autoFocus required maxLength={100} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="What are you planning?" /></label>
-          <div className={`calendar-modal-row calendar-modal-date-row ${allDay ? "is-all-day" : ""}`}><label>Date<input type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} required /></label><label className="calendar-all-day-toggle"><input type="checkbox" checked={allDay} onChange={(event) => setAllDay(event.target.checked)} />All day</label>{!allDay && <><label>Start<input type="time" value={time} onChange={(event) => setTime(event.target.value)} /></label><label>End<input type="time" value={endTime} onChange={(event) => setEndTime(event.target.value)} /></label></>}</div>
+          <div className={`calendar-modal-row calendar-modal-date-row ${allDay ? "is-all-day" : ""}`}><label>Date<input type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} required /></label>{!allDay && <><label>Start<input type="time" value={time} onChange={(event) => { setTime(event.target.value); if (event.target.value) setEndTime(nextHour(event.target.value)); }} /></label><label>End<input type="time" value={endTime} onChange={(event) => setEndTime(event.target.value)} /></label></>}</div>
           <label>Note<input maxLength={240} value={note} onChange={(event) => setNote(event.target.value)} placeholder="Optional details" /></label>
           <fieldset className="calendar-repeat-fieldset"><legend>Repeat</legend>
-            <div className="calendar-modal-row calendar-repeat-frequency-row"><label>Frequency<select value={repeatMode} onChange={(event) => setRepeatMode(event.target.value as typeof repeatMode)}><option value="none">Does not repeat</option><option value="daily">Every day</option><option value="custom">Custom</option></select></label>
+            <div className="calendar-modal-row calendar-repeat-frequency-row"><label>Frequency<select value={repeatMode} onChange={(event) => { setRepeatMode(event.target.value as typeof repeatMode); if (event.target.value === "none") setExceptOpen(false); }}><option value="none">Does not repeat</option><option value="daily">Every day</option><option value="custom">Custom interval</option></select></label>
               {repeatMode === "custom" && <label>Repeat every<input type="number" min={1} max={365} value={repeatInterval} onChange={(event) => setRepeatInterval(Number(event.target.value) || 1)} aria-label="Repeat every number of days" /></label>}
-              {repeatMode !== "none" && <div className="calendar-except-wrap"><span>Except</span><button type="button" className="calendar-except-trigger" aria-expanded={exceptOpen} onClick={() => setExceptOpen((open) => !open)}>{skipWeekdays.length ? `${skipWeekdays.length} days` : "Weekdays"}<ChevronDown size={13}/></button>{exceptOpen && <div className="calendar-except-menu" role="group" aria-label="Skip weekdays">{[[1,"Monday"],[2,"Tuesday"],[3,"Wednesday"],[4,"Thursday"],[5,"Friday"],[6,"Saturday"],[0,"Sunday"]].map(([day, label]) => <label key={day}><input type="checkbox" checked={skipWeekdays.includes(Number(day))} onChange={() => setSkipWeekdays((current) => current.includes(Number(day)) ? current.filter((item) => item !== Number(day)) : [...current, Number(day)])}/>{label}</label>)}</div>}</div>}
+              {repeatMode !== "none" && <div className="calendar-except-wrap"><span>Except</span><button type="button" className="calendar-except-trigger" aria-expanded={exceptOpen} onClick={() => setExceptOpen((open) => !open)}>{skipWeekdays.length ? `${skipWeekdays.length} days` : "Weekdays"}<ChevronDown size={13}/></button>{exceptOpen && <div className="calendar-except-menu" role="group" aria-label="Skip weekdays"><strong className="calendar-except-menu-title">Skip days</strong><div className="calendar-except-days">{[[1,"Monday"],[2,"Tuesday"],[3,"Wednesday"],[4,"Thursday"],[5,"Friday"],[6,"Saturday"],[0,"Sunday"]].map(([day, label]) => <label key={day}><input type="checkbox" checked={skipWeekdays.includes(Number(day))} onChange={() => setSkipWeekdays((current) => current.includes(Number(day)) ? current.filter((item) => item !== Number(day)) : [...current, Number(day)])}/>{label}</label>)}</div></div>}</div>}
             </div>
-            {repeatMode !== "none" && <div className="calendar-modal-row calendar-repeat-end"><label>Ends<select value={repeatEndMode} onChange={(event) => setRepeatEndMode(event.target.value as typeof repeatEndMode)}><option value="never">Never (forever)</option><option value="date">On a date</option></select></label>{repeatEndMode === "date" && <label>Until<input type="date" min={selectedDate} value={repeatUntil} onChange={(event) => setRepeatUntil(event.target.value)} required /></label>}</div>}
-            {repeatMode === "custom" && <p className="calendar-repeat-hint">Repeats every {repeatInterval} {repeatInterval === 1 ? "day" : "days"}.</p>}
+            {repeatMode !== "none" && <div className="calendar-modal-row calendar-repeat-end"><label>Until (optional)<input type="date" min={selectedDate} value={repeatUntil} onChange={(event) => setRepeatUntil(event.target.value)} /></label></div>}
           </fieldset>
-          <footer><button type="button" className="calendar-today-btn" onClick={resetEventForm}>Cancel</button><button className="primary-btn" type="submit"><CalendarPlus size={15} /> {editingEventId ? "Save changes" : "Save event"}</button></footer>
+          <footer><label className="calendar-all-day-toggle"><input type="checkbox" checked={allDay} onChange={(event) => setAllDay(event.target.checked)} />All day</label><div className="calendar-modal-footer-actions"><button type="button" className="calendar-today-btn" onClick={resetEventForm}>Cancel</button><button className="primary-btn" type="submit"><CalendarPlus size={15} /> {editingEventId ? "Save changes" : "Save schedule"}</button></div></footer>
         </form></div>}
       </section>
     </div>

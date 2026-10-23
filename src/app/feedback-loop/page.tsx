@@ -12,11 +12,11 @@ const LOOPS_KEY = "alleviate-feedback-loops-v1";
 type Cadence = "day" | "week" | "month";
 type Reading = { id: string; date: string; value: number; note?: string; inputValues?: Record<string, string> };
 type InputVariable = { id: string; name: string; value: string; tools: string };
-type LoopAction = { id: string; name: string; details: string; inputId: string; complete: boolean; completedDate?: string };
-type LoopVersion = { id: string; date: string; hypothesis: string; change: string; learning?: string; adjustment?: string };
+type LoopAction = { id: string; name: string; details: string; inputId: string; complete: boolean; completedDate?: string; dueDate?: string };
+type LoopVersion = { id: string; date: string; hypothesis: string; change: string; factorId?: string; learning?: string; adjustment?: string };
 type Loop = {
   objective: string;
-  objectiveType: "maintain" | "fix" | "upgrade" | "create";
+  objectiveType: "maintain" | "fix" | "upgrade" | "create" | "prepare";
   metric: string;
   unit: string;
   baseline: string;
@@ -28,9 +28,12 @@ type Loop = {
   nextAdjustment: string;
   inputs: InputVariable[];
   actions: LoopAction[];
+  readyBy?: string;
+  readiness?: string;
+  preparationRecords?: { id: string; date: string; note: string }[];
 };
 type Loops = Record<string, Loop>;
-const EMPTY_LOOP: Loop = { objective: "", objectiveType: "upgrade", metric: "Outcome", unit: "", baseline: "", target: "", cadence: "week", readings: [], versions: [], reviewLearning: "", nextAdjustment: "", inputs: [], actions: [] };
+const EMPTY_LOOP: Loop = { objective: "", objectiveType: "upgrade", metric: "Outcome", unit: "", baseline: "", target: "", cadence: "week", readings: [], versions: [], reviewLearning: "", nextAdjustment: "", inputs: [], actions: [], readyBy: "", readiness: "", preparationRecords: [] };
 
 function objectKey(name: string) { return name.trim().toLocaleLowerCase(); }
 function scheduleActionUrl(object: string, action: LoopAction) {
@@ -67,6 +70,7 @@ function withCurrentObjects(objects: string[], stored: Loops): Loops {
       versions: existing?.versions?.length ? existing.versions : [{ id: "initial", date: localDateKey(), hypothesis: "Starting point", change: "Initial setup" }],
       inputs: existing?.inputs || [],
       actions: existing?.actions || [],
+      preparationRecords: existing?.preparationRecords || [],
     };
   });
   return next;

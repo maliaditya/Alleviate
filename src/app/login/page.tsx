@@ -32,7 +32,9 @@ function LoginContent() {
       localStorage.setItem('alleviate_current_user', JSON.stringify(data?.user || { username: username.trim().toLowerCase(), email }));
       window.dispatchEvent(new Event('alleviate:auth-change'));
       setNotice(mode === 'register' ? 'Account created. You’re signed in.' : 'Welcome back.');
-      router.replace('/');
+      const requestedNext = params.get('next') || '/';
+      const safeNext = requestedNext.startsWith('/') && !requestedNext.startsWith('//') ? requestedNext : '/';
+      router.replace(safeNext);
     } catch (err) { setError(err instanceof Error ? err.message : 'Unable to reach authentication service.'); }
     finally { setBusy(false); }
   }
