@@ -284,7 +284,9 @@ export default function AppSidebar({ active }: { active: AppSection }) {
     const response = await requestAppApi(`${url.pathname}${url.search}`, { method, credentials: "include", headers: { "Content-Type": "application/json", "x-github-token": config.githubToken.trim() }, body: body ? JSON.stringify(body) : undefined }, username, raw ? "binary" : "json");
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
-      const message = response.status === 404 ? "No Alleviate backup was found in this GitHub repository." : (data.message || data.error || `GitHub request failed (${response.status}).`);
+      const message = response.status === 404
+        ? `GitHub could not ${method === "GET" ? "find" : method === "DELETE" ? "delete" : "write"} "${filePath}" in ${config.githubOwner}/${config.githubRepo}.`
+        : (data.message || data.error || `GitHub request failed (${response.status}).`);
       const error = new Error(message) as Error & { status?: number };
       error.status = response.status;
       throw error;
@@ -342,7 +344,12 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           remoteManifest = (await requestGitHubManifest(username, config, manifestPath)).manifest;
         } catch (error) {
           if ((error as Error & { status?: number }).status !== 404) throw error;
-          const legacy = await requestGitHubFile("GET", username, config, legacyFilePath) as { content?: string; encoding?: string };
+          let legacy: { content?: string; encoding?: string };
+          try { legacy = await requestGitHubFile("GET", username, config, legacyFilePath) as { content?: string; encoding?: string }; }
+          catch (legacyError) {
+            if ((legacyError as Error & { status?: number }).status === 404) throw new Error("No Alleviate backup manifest or legacy archive was found at this GitHub repository path.");
+            throw legacyError;
+          }
           if (typeof legacy.content !== "string" || legacy.encoding !== "base64") throw new Error("No modular backup manifest or legacy Alleviate backup was found at this repository path.");
           reportGitHubProgress("Found a legacy archive. Waiting for restore confirmation…");
           const confirmed = await dialogs.confirm({ title: "Restore legacy GitHub backup?", message: "This older backup is a single archive. Restoring it replaces the data on this device. Your next Push will create the new folder-based backup structure.", confirmLabel: "Restore backup", destructive: true });
