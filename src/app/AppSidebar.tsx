@@ -312,7 +312,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           window.location.reload();
           return true;
         }
-        if (!isValidBackupManifest(remoteManifest)) throw new Error("The GitHub manifest is missing, unsafe, or unsupported. No data was changed. Check the backup folder in GitHub settings or restore a legacy backup.");
+        if (!isValidBackupManifest(remoteManifest)) throw new Error("This GitHub backup manifest is unsafe or uses a format this app does not support. No data was changed. Open GitHub settings to choose a different backup folder, or restore a legacy backup.");
         const localFiles = await collectAlleviateGitHubFiles();
         for (const file of localFiles) await stageGitHubOutbox(file.path, file.blob);
         const localByPath = new Map(localFiles.map((file) => [file.path, file]));
@@ -359,7 +359,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           try { return await requestGitHubFile("GET", username, config, manifestPath) as GitHubBackupManifest; }
           catch (error) { if ((error as Error & { status?: number }).status === 404) return null; throw error; }
         })();
-        if (previousManifest && !isValidBackupManifest(previousManifest)) throw new Error("This repository path contains an unsafe or unsupported backup manifest.");
+        if (previousManifest && !isValidBackupManifest(previousManifest)) throw new Error("This GitHub backup manifest is unsafe or uses a format this app does not support. Push was stopped and no data was changed. Open GitHub settings to choose a different backup folder.");
         if (!previousManifest) {
           let remoteItems: unknown = [];
           try { remoteItems = await requestGitHubFile("GET", username, config, rootPath); }
@@ -536,12 +536,12 @@ export default function AppSidebar({ active }: { active: AppSection }) {
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not complete the GitHub action.";
-      const credentialError = /bad credentials|requires authentication|invalid.{0,20}(token|credential)|expired.{0,20}token/i.test(message)
+      const settingsError = /bad credentials|requires authentication|invalid.{0,20}(token|credential)|expired.{0,20}token|manifest|backup folder/i.test(message)
         || (error as Error & { status?: number }).status === 401;
       setGitHubError(message);
-      if (credentialError) setGitHubNeedsSettings(true);
+      if (settingsError) setGitHubNeedsSettings(true);
       if (!options.silent) {
-        if (credentialError) {
+        if (settingsError) {
           const openSettings = await dialogs.confirm({ title: "GitHub sync failed", message, confirmLabel: "Open settings" });
           if (openSettings) await openGitHubSettings();
         } else await dialogs.alert({ title: "GitHub sync failed", message });
@@ -668,7 +668,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           <button type="button" role="menuitem" onClick={() => { setSettingsOpen(false); setAutoBackupOpen(true); }}><Settings2 size={15} /><span>Automatic backup settings</span></button>
         </div>}
       </div>
-      {githubSyncReady && (!githubLinked || githubNeedsSettings) && <button type="button" className={`sidebar-link sidebar-settings-button ${githubNeedsSettings ? "github-settings-needs-attention" : ""}`} aria-label="GitHub settings" title={githubNeedsSettings ? "GitHub credentials need attention · Open settings" : "GitHub settings"} onClick={() => void openGitHubSettings()}><Settings2 size={19}/></button>}
+      {githubSyncReady && (!githubLinked || githubNeedsSettings) && <button type="button" className={`sidebar-link sidebar-settings-button ${githubNeedsSettings ? "github-settings-needs-attention" : ""}`} aria-label="GitHub settings" title={githubNeedsSettings ? "GitHub settings need attention · Open settings" : "GitHub settings"} onClick={() => void openGitHubSettings()}><Settings2 size={19}/></button>}
       <input ref={importInputRef} hidden type="file" accept=".zip,application/zip" onChange={(event) => void importBackup(event.target.files?.[0])} />
       <button type="button" className="sidebar-avatar" aria-label="Open profile" title="Profile" onClick={() => setProfileOpen(true)}>A</button>
     </div>
