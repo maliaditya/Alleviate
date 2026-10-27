@@ -311,6 +311,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
     githubActionInFlightRef.current = true;
     let releaseCrossTabLock: (() => void) | undefined;
     let crossTabLockTask: Promise<unknown> | undefined;
+    let releaseRemoteSyncLock: (() => Promise<void>) | undefined;
     if (typeof navigator !== "undefined" && navigator.locks) {
       let resolveLockAcquired!: (acquired: boolean) => void;
       const lockAcquired = new Promise<boolean>((resolve) => { resolveLockAcquired = resolve; });
@@ -334,6 +335,100 @@ export default function AppSidebar({ active }: { active: AppSection }) {
     setGitHubProgress({ mode: action === "pull" ? "pull" : "push", status: "running", title: action === "pull" ? "GitHub Pull Running" : action === "hard-push" ? "GitHub Hard Push Running" : "GitHub Push Running", logs: ["Connecting to GitHub…"], processed: 0, total: 0, uploaded: 0, skipped: 0 });
     try {
       const { username, config, rootPath, legacyFilePath } = await getGitHubConfig();
+      const remoteLockPath = [rootPath, ".alleviate-sync-lock.json"].filter(Boolean).join("/");
+      const lockToken = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const lockTtlMs = 90_000;
+      let lockSha: string | undefined;
+      let lockLost = false;
+      let lockQueue: Promise<unknown> = Promise.resolve();
+      const serializedLockWork = <T,>(work: () => Promise<T>) => {
+        const next = lockQueue.then(work, work);
+        lockQueue = next.then(() => undefined, () => undefined);
+        return next;
+      };
+      const readRemoteLock = async (): Promise<{ token: string; expiresAt: number; sha?: string } | null> => {
+        try {
+          const file = await requestGitHubFile("GET", username, config, remoteLockPath) as { content?: unknown; encoding?: unknown; sha?: unknown };
+          if (typeof file.content !== "string" || file.encoding !== "base64") throw new Error("The GitHub sync lock file is unreadable. Remove .alleviate-sync-lock.json from the backup folder, then retry.");
+          let data: { token?: unknown; expiresAt?: unknown };
+          try { data = JSON.parse(await decodeBase64Blob(file.content, "application/json").text()); }
+          catch { throw new Error("The GitHub sync lock file is invalid. Remove .alleviate-sync-lock.json from the backup folder, then retry."); }
+          if (typeof data.token !== "string" || typeof data.expiresAt !== "number") throw new Error("The GitHub sync lock file is unsupported. Remove .alleviate-sync-lock.json from the backup folder, then retry.");
+          return { token: data.token, expiresAt: data.expiresAt, sha: typeof file.sha === "string" ? file.sha : undefined };
+        } catch (error) {
+          if ((error as Error & { status?: number }).status === 404) return null;
+          throw error;
+        }
+      };
+      const writeRemoteLock = async (sha: string | undefined, expiresAt: number) => {
+        const body: Record<string, unknown> = {
+          message: "Alleviate sync lock",
+          content: await encodeBlobBase64(new Blob([JSON.stringify({ token: lockToken, expiresAt, client: typeof window !== "undefined" && (window as Window & { alleviateDesktop?: { isDesktop?: boolean } }).alleviateDesktop?.isDesktop ? "desktop" : "browser" })], { type: "application/json" })),
+        };
+        if (sha) body.sha = sha;
+        await requestGitHubFile("PUT", username, config, remoteLockPath, body);
+        const saved = await readRemoteLock();
+        if (!saved || saved.token !== lockToken) throw new Error("Another Alleviate client took the GitHub sync lock. This sync stopped before continuing.");
+        lockSha = saved.sha;
+      };
+      let remoteLockTimer: number | undefined;
+      const acquireRemoteLock = async () => {
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          const current = await readRemoteLock();
+          if (current && current.expiresAt > Date.now() && current.token !== lockToken) {
+            const takeover = action === "hard-push" && await dialogs.confirm({
+              title: "Stop the other GitHub sync?",
+              message: "Another browser or desktop client is syncing this backup. Taking over will make that client stop before its next GitHub write, then continue with this hard push.",
+              confirmLabel: "Stop other sync",
+              destructive: true,
+            });
+            if (!takeover) {
+              setGitHubProgress((progress) => progress ? { ...progress, status: "cancelled", title: "GitHub Sync Already Running", logs: [...progress.logs, "Another client owns the sync lock. No files were changed by this attempt."].slice(-8) } : progress);
+              if (!options.silent && action !== "hard-push") await dialogs.alert({ title: "GitHub sync already running", message: "Another browser or desktop client is syncing this backup. Wait for it to finish, then retry." });
+              return false;
+            }
+          }
+          try {
+            await writeRemoteLock(current?.sha, Date.now() + lockTtlMs);
+            break;
+          } catch (error) {
+            const status = (error as Error & { status?: number }).status;
+            if ((status !== 409 && status !== 422) || attempt === 4) throw error;
+            await new Promise((resolve) => setTimeout(resolve, 150 * (2 ** attempt) + Math.random() * 100));
+          }
+        }
+        const check = await readRemoteLock();
+        if (!check || check.token !== lockToken) throw new Error("Could not acquire the GitHub sync lock. Another client may be syncing this backup.");
+        remoteLockTimer = window.setInterval(() => {
+          void serializedLockWork(async () => {
+            try {
+              const current = await readRemoteLock();
+              if (!current || current.token !== lockToken) { lockLost = true; return; }
+              await writeRemoteLock(current.sha, Date.now() + lockTtlMs);
+            } catch { lockLost = true; }
+          });
+        }, 20_000);
+        releaseRemoteSyncLock = async () => {
+          if (remoteLockTimer !== undefined) window.clearInterval(remoteLockTimer);
+          await serializedLockWork(async () => {
+            try {
+              const current = await readRemoteLock();
+              if (current?.token === lockToken && current.sha) await requestGitHubFile("DELETE", username, config, remoteLockPath, { message: "Release Alleviate sync lock", sha: current.sha });
+            } catch { /* The lease expires automatically if GitHub is temporarily unavailable. */ }
+          });
+        };
+        return true;
+      };
+      const assertRemoteLock = async () => serializedLockWork(async () => {
+        if (lockLost) throw new Error("Another client stopped this sync by taking over the GitHub lock. No further files will be written.");
+        const current = await readRemoteLock();
+        if (!current || current.token !== lockToken) {
+          lockLost = true;
+          throw new Error("Another client stopped this sync by taking over the GitHub lock. No further files will be written.");
+        }
+        lockSha = current.sha;
+      });
+      if (!await acquireRemoteLock()) return false;
       reportGitHubProgress(`Connected to ${config.githubOwner}/${config.githubRepo}${rootPath ? ` · ${rootPath}` : " · repository root"}.`);
       setGitHubSyncScope(`${username}:${config.githubOwner.trim().toLowerCase()}/${config.githubRepo.trim().toLowerCase()}/${rootPath}`);
       const manifestPath = [rootPath, "manifest.json"].filter(Boolean).join("/");
@@ -435,7 +530,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           let remoteItems: unknown = [];
           try { remoteItems = await requestGitHubFile("GET", username, config, rootPath); }
           catch (error) { if ((error as Error & { status?: number }).status !== 404) throw error; }
-          if (!Array.isArray(remoteItems) || remoteItems.length > 0) {
+          if (!Array.isArray(remoteItems) || remoteItems.some((item) => item && typeof item === "object" && (item as { name?: unknown }).name !== ".alleviate-sync-lock.json")) {
             throw new Error("No Alleviate manifest was found, but this GitHub backup folder already contains files. Push was stopped to protect them. Use Pull to restore a legacy backup, or choose an empty backup folder in GitHub settings.");
           }
         }
@@ -527,6 +622,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
             const payload: Record<string, unknown> = { message: `Alleviate backup: ${file.path}`, content: await encodeBlobBase64(desired.blob) };
             if (metadata?.sha) payload.sha = metadata.sha;
             try {
+              await assertRemoteLock();
               await requestGitHubFile("PUT", username, config, [rootPath, file.path].filter(Boolean).join("/"), payload);
               const verified = await requestGitHubFile("GET", username, config, [rootPath, file.path].filter(Boolean).join("/"), undefined, true) as Blob;
               if (await hashBlob(verified) !== desiredHash) {
@@ -582,6 +678,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
                 continue;
               }
               try {
+                await assertRemoteLock();
                 if (remote.sha) await requestGitHubFile("DELETE", username, config, [rootPath, path].filter(Boolean).join("/"), { message: `Remove deleted Alleviate data: ${path}`, sha: remote.sha });
                 removed = true;
               } catch (error) {
@@ -622,6 +719,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
             const payload: Record<string, unknown> = { message: "Alleviate backup manifest", content: await encodeBlobBase64(new Blob([JSON.stringify(manifest, null, 2)], { type: "application/json" })) };
             if (manifestFileSha) payload.sha = manifestFileSha;
             try {
+              await assertRemoteLock();
               await requestGitHubFile("PUT", username, config, manifestPath, payload);
               const verified = (await requestGitHubManifest(username, config, manifestPath)).manifest;
               if (verified.format !== "alleviate-github-backup" || verified.version !== 1) throw new Error("GitHub returned an invalid manifest after the write.");
@@ -665,6 +763,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
       }
       return false;
     } finally {
+      await releaseRemoteSyncLock?.();
       setGitHubBusy(null);
       githubActionInFlightRef.current = false;
       releaseCrossTabLock?.();
@@ -767,7 +866,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
     <div className="sidebar-bottom-actions">
       <div className="sidebar-settings-wrap" ref={githubMenuRef}>
         <button type="button" className={`sidebar-link sidebar-settings-button ${githubMenuOpen ? "is-active" : ""}`} aria-label="GitHub sync" title="GitHub sync" aria-haspopup="menu" aria-expanded={githubMenuOpen} disabled={Boolean(githubBusy)} onClick={() => setGitHubMenuOpen((open) => !open)}>
-          {githubBusy ? <LoaderCircle size={18} className="sidebar-backup-spinner"/> : <Github size={19} aria-hidden="true"/>}
+          <Github size={19} aria-hidden="true"/>
         </button>
         {githubMenuOpen && <div className="sidebar-github-menu" role="menu" aria-label="GitHub sync actions">
           <div className="sidebar-settings-menu-title">GitHub sync</div>
