@@ -1676,6 +1676,7 @@ body,
 .sidebar-transfer-icon { display:flex;align-items:center;justify-content:center;gap:1px; } .sidebar-transfer-icon svg { flex:none; }
 .sidebar-settings-button,.sidebar-settings-button:hover,.sidebar-settings-button.is-active { background:transparent; } .sidebar-settings-button:hover { color:#f6f7fb; }
 .sidebar-settings-button { appearance:none;-webkit-appearance:none; border:0; padding:0; color:#969696; background:transparent !important; box-shadow:none; } .sidebar-settings-button:hover,.sidebar-settings-button:active,.sidebar-settings-button.is-active,.sidebar-settings-button:focus { background:transparent !important; box-shadow:none; } .sidebar-settings-button:focus-visible { outline:2px solid #a78bfa;outline-offset:2px; }
+.sidebar-settings-button.github-settings-needs-attention { color:#fda4af;filter:drop-shadow(0 0 5px #fb718566); }
 .landing-page { position:relative;isolation:isolate;min-height:100vh;overflow:hidden;color:#f6f7fb;background:radial-gradient(ellipse at 52% 5%,#25233a 0%,#13151d 45%,#0d0f14 100%); }
 .landing-particles { position:absolute;inset:0;z-index:-1;opacity:.32;pointer-events:none; }
 .landing-particles .home-particle-network { width:100%;height:100%; }

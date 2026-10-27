@@ -56,6 +56,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
   const [githubLastSyncAt, setGitHubLastSyncAt] = useState(0);
   const [githubBusy, setGitHubBusy] = useState<"pull" | "push" | "hard-push" | null>(null);
   const [githubError, setGitHubError] = useState("");
+  const [githubNeedsSettings, setGitHubNeedsSettings] = useState(false);
   const githubActionInFlightRef = useRef(false);
   const githubAutoSyncInFlightRef = useRef(false);
   const autoBackupRunRef = useRef<string | null>(null);
@@ -237,6 +238,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
       const scope = `${username}:${githubSettings.githubOwner.trim().toLowerCase()}/${githubSettings.githubRepo.trim().toLowerCase()}/${rootPath}`;
       setGitHubSyncScope(scope); setGitHubSyncScopeKey(scope);
       setGitHubLinked(true);
+      setGitHubNeedsSettings(false);
       setGitHubSyncReady(true);
       setGitHubLastSyncAt(await getGitHubLastSyncAt());
       setGitHubConflicts(await listGitHubConflicts());
@@ -522,11 +524,20 @@ export default function AppSidebar({ active }: { active: AppSection }) {
         setGitHubLastSyncAt(syncedAt);
       }
       setGitHubError("");
+      setGitHubNeedsSettings(false);
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not complete the GitHub action.";
+      const credentialError = /bad credentials|requires authentication|invalid.{0,20}(token|credential)|expired.{0,20}token/i.test(message)
+        || (error as Error & { status?: number }).status === 401;
       setGitHubError(message);
-      if (!options.silent) await dialogs.alert({ title: "GitHub sync failed", message });
+      if (credentialError) setGitHubNeedsSettings(true);
+      if (!options.silent) {
+        if (credentialError) {
+          const openSettings = await dialogs.confirm({ title: "GitHub sync failed", message, confirmLabel: "Open settings" });
+          if (openSettings) await openGitHubSettings();
+        } else await dialogs.alert({ title: "GitHub sync failed", message });
+      }
       return false;
     } finally { setGitHubBusy(null); githubActionInFlightRef.current = false; }
   };
@@ -649,7 +660,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           <button type="button" role="menuitem" onClick={() => { setSettingsOpen(false); setAutoBackupOpen(true); }}><Settings2 size={15} /><span>Automatic backup settings</span></button>
         </div>}
       </div>
-      {githubSyncReady && !githubLinked && <button type="button" className="sidebar-link sidebar-settings-button" aria-label="GitHub settings" title="GitHub settings" onClick={() => void openGitHubSettings()}><Settings2 size={19}/></button>}
+      {githubSyncReady && (!githubLinked || githubNeedsSettings) && <button type="button" className={`sidebar-link sidebar-settings-button ${githubNeedsSettings ? "github-settings-needs-attention" : ""}`} aria-label="GitHub settings" title={githubNeedsSettings ? "GitHub credentials need attention · Open settings" : "GitHub settings"} onClick={() => void openGitHubSettings()}><Settings2 size={19}/></button>}
       <input ref={importInputRef} hidden type="file" accept=".zip,application/zip" onChange={(event) => void importBackup(event.target.files?.[0])} />
       <button type="button" className="sidebar-avatar" aria-label="Open profile" title="Profile" onClick={() => setProfileOpen(true)}>A</button>
     </div>
