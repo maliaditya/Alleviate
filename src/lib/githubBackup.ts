@@ -214,7 +214,11 @@ export async function mergeGitHubFile(path: string, base: Blob | undefined, loca
     return { conflict: true, reason: "This device deleted the file while GitHub had newer changes." };
   }
   if (!remote) {
-    if (!base || await hashBlob(local) === await hashBlob(base)) return { conflict: false };
+    // A missing remote file cannot be used as the merged result. When there is
+    // no checkpoint, or the local file still matches the checkpoint, restore
+    // that known local version to GitHub. If both sides changed independently,
+    // keep the existing conflict protection.
+    if (!base || await hashBlob(local) === await hashBlob(base)) return { blob: local, conflict: false };
     return { conflict: true, reason: "Remote file was deleted while this device had local changes." };
   }
   const localHash = await hashBlob(local); const remoteHash = await hashBlob(remote);
