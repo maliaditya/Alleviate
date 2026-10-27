@@ -78,6 +78,7 @@ export default function CalendarPage() {
   const resizeGesture = useRef<{ id: string; startY: number; duration: number; start: number } | null>(null);
   const eventsRef = useRef(events);
   const timeScrollRef = useRef<HTMLDivElement>(null);
+  const agendaScrollRef = useRef<HTMLElement>(null);
 
   useEffect(() => { eventsRef.current = events; }, [events]);
 
@@ -124,6 +125,15 @@ export default function CalendarPage() {
       requestAnimationFrame(() => { if (timeScrollRef.current) timeScrollRef.current.scrollTop = 32 + dayStartHour * 60 - 8; });
     }
   }, [view, selectedDate, dayStartHour]);
+
+  useEffect(() => {
+    if (view !== "agenda") return;
+    const frame = requestAnimationFrame(() => {
+      const today = agendaScrollRef.current?.querySelector<HTMLElement>("[data-agenda-today='true']");
+      if (today) agendaScrollRef.current?.scrollTo({ top: today.offsetTop - (agendaScrollRef.current?.offsetTop || 0), behavior: "auto" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [view, month]);
 
   useEffect(() => {
     const onPointerMove = (pointer: PointerEvent) => {
@@ -352,8 +362,8 @@ export default function CalendarPage() {
             })}
           </div></div>
         </section>}
-        {view === "agenda" && <section className="calendar-agenda-view" aria-label="Agenda">
-          {shownDays.map((day) => { const key = dateKey(day); const items = [...events.filter((event) => eventOccursOnDate(event, key)).map((event) => ({ kind: "event" as const, id: event.id, title: `${event.title}${event.repeat ? " ↻" : ""}`, time: event.time, endTime: event.endTime, note: event.note, color: eventColorIndex(event) })), ...readings.filter((reading) => reading.date === key).map((reading) => ({ kind: "reading" as const, id: reading.id, title: `${reading.object} · ${reading.value}${reading.unit ? ` ${reading.unit}` : ""}`, time: "", endTime: undefined, note: `${reading.metric}${reading.note ? ` · ${reading.note}` : ""}`, color: 1 }))].sort((a, b) => (a.time || "99:99").localeCompare(b.time || "99:99")); if (!items.length) return null; return <section className="calendar-agenda-day" key={key}><header><strong>{day.getDate()}</strong><div><b>{day.toLocaleDateString(undefined, { weekday: "long" })}</b><span>{day.toLocaleDateString(undefined, { month: "long", year: "numeric" })}</span></div></header><div className="calendar-agenda-items">{items.map((item) => <article role={item.kind === "event" ? "button" : undefined} tabIndex={item.kind === "event" ? 0 : undefined} onClick={() => { if (item.kind === "event") editEventById(item.id); }} onKeyDown={(keyEvent) => { if (item.kind === "event" && (keyEvent.key === "Enter" || keyEvent.key === " ")) { keyEvent.preventDefault(); editEventById(item.id); } }} className={`calendar-agenda-item event-color-${item.color} ${item.kind === "reading" ? "is-reading" : ""}`} key={`${item.kind}-${item.id}-${key}`}><time>{item.time ? `${formatClock(item.time)}${item.endTime ? ` – ${formatClock(item.endTime)}` : ""}` : item.kind === "reading" ? "Progress" : "All day"}</time><div><strong>{item.title}</strong>{item.note && <p>{item.note}</p>}</div>{item.kind === "event" && <button aria-label={`Delete ${item.title} series`} onClick={(click) => { click.stopPropagation(); removeEvent(item.id); }}><Trash2 size={14} /></button>}</article>)}</div></section>; })}
+        {view === "agenda" && <section className="calendar-agenda-view" aria-label="Agenda" ref={agendaScrollRef}>
+          {shownDays.map((day) => { const key = dateKey(day); const items = [...events.filter((event) => eventOccursOnDate(event, key)).map((event) => ({ kind: "event" as const, id: event.id, title: `${event.title}${event.repeat ? " ↻" : ""}`, time: event.time, endTime: event.endTime, note: event.note, color: eventColorIndex(event) })), ...readings.filter((reading) => reading.date === key).map((reading) => ({ kind: "reading" as const, id: reading.id, title: `${reading.object} · ${reading.value}${reading.unit ? ` ${reading.unit}` : ""}`, time: "", endTime: undefined, note: `${reading.metric}${reading.note ? ` · ${reading.note}` : ""}`, color: 1 }))].sort((a, b) => (a.time || "99:99").localeCompare(b.time || "99:99")); return <section className={`calendar-agenda-day ${key === dateKey(now) ? "is-today" : ""}`} data-agenda-today={key === dateKey(now) ? "true" : undefined} key={key}><header><strong>{day.getDate()}</strong><div><b>{day.toLocaleDateString(undefined, { weekday: "long" })}{key === dateKey(now) ? " · Today" : ""}</b><span>{day.toLocaleDateString(undefined, { month: "long", year: "numeric" })}</span></div></header><div className="calendar-agenda-items">{items.map((item) => <article role={item.kind === "event" ? "button" : undefined} tabIndex={item.kind === "event" ? 0 : undefined} onClick={() => { if (item.kind === "event") editEventById(item.id); }} onKeyDown={(keyEvent) => { if (item.kind === "event" && (keyEvent.key === "Enter" || keyEvent.key === " ")) { keyEvent.preventDefault(); editEventById(item.id); } }} className={`calendar-agenda-item event-color-${item.color} ${item.kind === "reading" ? "is-reading" : ""}`} key={`${item.kind}-${item.id}-${key}`}><time>{item.time ? `${formatClock(item.time)}${item.endTime ? ` – ${formatClock(item.endTime)}` : ""}` : item.kind === "reading" ? "Progress" : "All day"}</time><div><strong>{item.title}</strong>{item.note && <p>{item.note}</p>}</div>{item.kind === "event" && <button aria-label={`Delete ${item.title} series`} onClick={(click) => { click.stopPropagation(); removeEvent(item.id); }}><Trash2 size={14} /></button>}</article>)}</div></section>; })}
           {!shownDays.some((day) => events.some((event) => eventOccursOnDate(event, dateKey(day))) || readings.some((reading) => reading.date === dateKey(day))) && <div className="calendar-agenda-empty"><CalendarDays size={24} /><strong>No plans this month</strong><span>Add an event or log feedback progress to see it here.</span></div>}
         </section>}
         <nav className="calendar-bottom-switcher" aria-label="Calendar view navigation">

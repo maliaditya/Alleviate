@@ -686,6 +686,7 @@ button, input { font: inherit; }
 .calendar-agenda-day > header > div { display: grid; gap: 4px; }
 .calendar-agenda-day > header b { color: #d5d7dc; font-size: 12px; }
 .calendar-agenda-day > header span { color: #8d929c; font-size: 10px; }
+.calendar-agenda-day.is-today > header > strong, .calendar-agenda-day.is-today > header b { color: #a78bfa; }
 .calendar-agenda-items { display: grid; gap: 10px; }
 .calendar-agenda-item { min-height: 58px; padding: 10px 12px; display: grid; grid-template-columns: 125px minmax(0, 1fr) 24px; align-items: center; gap: 12px; border-left: 4px solid #557cf0; border-radius: 6px; background: #202330; }
 .calendar-agenda-item[role="button"] { cursor: pointer; }

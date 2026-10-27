@@ -28,6 +28,13 @@ function occursOn(task: Task, day: string) {
   const daysApart = Math.round((localDate(day).getTime() - localDate(task.date).getTime()) / 86400000);
   return daysApart >= 0 && daysApart % Math.max(1, task.repeat.interval || 1) === 0;
 }
+function displayedTaskDate(task: Task, view: TaskView, today: string) {
+  if (view === "today") return today;
+  if (view === "next") {
+    return Array.from({ length: 7 }, (_, index) => dateKey(new Date(localDate(today).getTime() + index * 86400000))).find((day) => occursOn(task, day)) || task.date;
+  }
+  return task.date;
+}
 function addMinutesToTime(value: string, minutes: number) {
   const [hours, mins] = value.split(":").map(Number);
   const total = ((hours * 60 + mins + minutes) % 1440 + 1440) % 1440;
@@ -515,7 +522,7 @@ export default function TaskListPage() {
                   <article key={task.id} onClick={() => { setSelectedId(task.id); setSelectedObject(null); setSelectedAction(null); }} className={`today-task-row ${task.completedDates?.includes(today) ? "is-complete" : ""} ${selected?.id === task.id && !selectedAction ? "is-selected" : ""}`}>
                     <button type="button" className="today-task-check" style={taskCheckboxStyle(task.id)} onClick={(event) => { event.stopPropagation(); toggle(task); }} aria-label={`Toggle ${task.title}`}>{task.completedDates?.includes(today) && <Check size={14} />}</button>
                     <div className="today-task-copy"><strong>{task.title}</strong><small className="task-action-meta">{taskMetadata(task).map((detail, index) => <span key={`${detail}-${index}`}>{detail}</span>)}</small>{taskScheduleNote(task) && <small className="task-action-note">{taskScheduleNote(task)}</small>}</div>
-                    <span className="today-task-time">{task.date}</span>
+                    <span className="today-task-time">{displayedTaskDate(task, view, today)}</span>
                     <div className="task-row-tools"><button type="button" className="task-row-icon" title="Schedule task" aria-label={`Schedule ${task.title}`} onClick={(event) => { event.stopPropagation(); openSchedule({ title: task.title, note: task.note, existing: task }); }}><CalendarPlus size={15} /></button><button type="button" className="today-task-delete" onClick={(event) => { event.stopPropagation(); remove(task); }} aria-label={`Delete ${task.title}`}><Trash2 size={14} /></button></div>
                   </article>
                 )) : <div className="tasks-empty"><span><Check size={24} /></span><strong>No tasks here</strong><p>Add a task above to get started.</p></div>}
