@@ -312,7 +312,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           window.location.reload();
           return true;
         }
-        if (!isValidBackupManifest(remoteManifest)) throw new Error("The GitHub manifest is missing, unsafe, or unsupported. Push once to initialize the backup folders.");
+        if (!isValidBackupManifest(remoteManifest)) throw new Error("The GitHub manifest is missing, unsafe, or unsupported. No data was changed. Check the backup folder in GitHub settings or restore a legacy backup.");
         const localFiles = await collectAlleviateGitHubFiles();
         for (const file of localFiles) await stageGitHubOutbox(file.path, file.blob);
         const localByPath = new Map(localFiles.map((file) => [file.path, file]));
@@ -360,6 +360,14 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           catch (error) { if ((error as Error & { status?: number }).status === 404) return null; throw error; }
         })();
         if (previousManifest && !isValidBackupManifest(previousManifest)) throw new Error("This repository path contains an unsafe or unsupported backup manifest.");
+        if (!previousManifest) {
+          let remoteItems: unknown = [];
+          try { remoteItems = await requestGitHubFile("GET", username, config, rootPath); }
+          catch (error) { if ((error as Error & { status?: number }).status !== 404) throw error; }
+          if (!Array.isArray(remoteItems) || remoteItems.length > 0) {
+            throw new Error("No Alleviate manifest was found, but this GitHub backup folder already contains files. Push was stopped to protect them. Use Pull to restore a legacy backup, or choose an empty backup folder in GitHub settings.");
+          }
+        }
         if (previousManifest && action !== "hard-push") {
           const localByPath = new Map(snapshot.map((file) => [file.path, file]));
           const remoteMerges: Array<{ path: string; blob: Blob }> = [];
