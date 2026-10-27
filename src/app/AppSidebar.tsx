@@ -6,7 +6,7 @@ import { Activity, ArrowDownUp, BookOpen, CalendarDays, Check, CheckSquare, Down
 import { useAppDialogs } from "./AppDialogs";
 import { createAppBackup, downloadAppBackup, parseAppBackup, restoreAppBackup } from "../lib/appBackup";
 import { requestAppApi } from "../lib/desktopAuth";
-import { applyAlleviateGitHubChanges, clearGitHubConflict, collectAlleviateGitHubFiles, decodeBase64Blob, encodeBlobBase64, getGitHubCheckpoint, getGitHubLastSyncAt, hashBlob, listGitHubConflicts, mergeGitHubFile, saveGitHubCheckpoint, saveGitHubConflict, saveGitHubLastSyncAt, setGitHubSyncScope, stageGitHubOutbox, type GitHubBackupManifest } from "../lib/githubBackup";
+import { applyAlleviateGitHubChanges, clearGitHubConflict, collectAlleviateGitHubFiles, decodeBase64Blob, encodeBlobBase64, getGitHubCheckpoint, getGitHubLastSyncAt, hashBlob, isSensitiveGitHubBackupPath, listGitHubConflicts, mergeGitHubFile, saveGitHubCheckpoint, saveGitHubLastSyncAt, saveGitHubRecoveryCopy, setGitHubSyncScope, stageGitHubOutbox, type GitHubBackupManifest } from "../lib/githubBackup";
 
 type AppSection = "home" | "canvas" | "books" | "mind-map" | "feedback-loop" | "countdown" | "calendar" | "eisenhower" | "tasks" | "tracking" | "support";
 type AutoBackupSettings = { directoryPath: string; lastRunWeek: string; lastRunAt: string; lastFilePath: string };
@@ -467,25 +467,31 @@ export default function AppSidebar({ active }: { active: AppSection }) {
         const localByPath = new Map(localFiles.map((file) => [file.path, file]));
         const downloads: Array<{ path: string; blob: Blob }> = [];
         const checkpoints: Array<{ path: string; blob: Blob; acknowledge: boolean }> = [];
-        const conflicts: string[] = [];
+        let autoResolvedCount = 0;
         let pullProcessed = 0;
         let pullSkipped = 0;
         for (const [path, remoteHash] of Object.entries(remoteManifest.files)) {
           reportGitHubProgress(`Checking ${path}…`);
+          if (isSensitiveGitHubBackupPath(path)) {
+            await clearGitHubConflict(path);
+            pullProcessed += 1;
+            pullSkipped += 1;
+            reportGitHubProgress(`Skipped sensitive credential · ${path}`, { processed: pullProcessed, skipped: pullSkipped });
+            continue;
+          }
           const local = localByPath.get(path)?.blob;
           const base = await getGitHubCheckpoint(path);
           await stageGitHubOutbox(path, local);
           const localHash = local ? await hashBlob(local) : undefined;
-          if (localHash === remoteHash) { const same = local!; checkpoints.push({ path, blob: same, acknowledge: true }); pullProcessed += 1; pullSkipped += 1; reportGitHubProgress(`Already current · ${path}`, { processed: pullProcessed, skipped: pullSkipped }); continue; }
+          if (localHash === remoteHash) { const same = local!; checkpoints.push({ path, blob: same, acknowledge: true }); await clearGitHubConflict(path); pullProcessed += 1; pullSkipped += 1; reportGitHubProgress(`Already current · ${path}`, { processed: pullProcessed, skipped: pullSkipped }); continue; }
           const remote = await requestGitHubFile("GET", username, config, [rootPath, path].filter(Boolean).join("/"), undefined, true) as Blob;
-          const merged = await mergeGitHubFile(path, base, local, remote);
+          const merged = await mergeGitHubFile(path, base, local, remote, "remote");
           if (merged.conflict) {
-            await saveGitHubConflict(path, base, local, remote, merged.reason || "The changes need manual review.");
-            conflicts.push(path);
-            pullProcessed += 1;
-            reportGitHubProgress(`Conflict saved for review · ${path}`, { processed: pullProcessed });
-            continue;
+            autoResolvedCount += 1;
+            await saveGitHubRecoveryCopy(path, base, local, remote, merged.reason || "Pull chose GitHub's version for this conflicting file.");
+            reportGitHubProgress(`Auto-resolved conflict · kept GitHub version · ${path}`);
           }
+          await clearGitHubConflict(path);
           if (merged.blob && (!local || await hashBlob(merged.blob) !== localHash)) { downloads.push({ path, blob: merged.blob }); reportGitHubProgress(`Merged remote changes · ${path}`); }
           else { pullSkipped += 1; reportGitHubProgress(`No local change needed · ${path}`); }
           checkpoints.push({ path, blob: remote, acknowledge: Boolean(merged.blob && await hashBlob(merged.blob) === remoteHash) });
@@ -502,10 +508,14 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           if (!local || !base || await hashBlob(local) === await hashBlob(base)) {
             deletionsToApply.push(path);
             await saveGitHubCheckpoint(path);
+            await clearGitHubConflict(path);
           } else {
-            await saveGitHubConflict(path, base, local, undefined, "GitHub deleted this file while this device had local changes.");
-            conflicts.push(path);
-            reportGitHubProgress(`Kept local file; deletion conflict · ${path}`);
+            autoResolvedCount += 1;
+            await saveGitHubRecoveryCopy(path, base, local, undefined, "Pull followed GitHub's deletion; the local copy was kept for recovery.");
+            deletionsToApply.push(path);
+            await saveGitHubCheckpoint(path);
+            await clearGitHubConflict(path);
+            reportGitHubProgress(`Auto-resolved deletion · kept GitHub version · ${path}`);
           }
           pullProcessed += 1;
           reportGitHubProgress(`Processed deletion · ${path}`, { processed: pullProcessed });
@@ -513,9 +523,9 @@ export default function AppSidebar({ active }: { active: AppSection }) {
         reportGitHubProgress(`Applying ${downloads.length} downloaded file${downloads.length === 1 ? "" : "s"} on this device…`);
         await applyAlleviateGitHubChanges(downloads, deletionsToApply);
         for (const checkpoint of checkpoints) await saveGitHubCheckpoint(checkpoint.path, checkpoint.blob, checkpoint.acknowledge);
-        const pullSummary = `Downloaded/merged ${downloads.length} · Already current ${pullSkipped} · Conflicts ${conflicts.length}`;
-        setGitHubProgress((current) => current ? { ...current, status: conflicts.length ? "error" : "success", title: conflicts.length ? "GitHub Pull Needs Review" : "GitHub Pull Complete", processed: pullTotal, total: pullTotal, skipped: pullSkipped, logs: [...current.logs, pullSummary].slice(-8) } : current);
-        if (!options.silent) await dialogs.alert({ title: conflicts.length ? "GitHub pull needs review" : "GitHub pull complete", message: `Merged ${downloads.length} changed files from GitHub. ${conflicts.length ? `${conflicts.length} conflicting file(s) were kept locally and saved for recovery: ${conflicts.slice(0, 5).join(", ")}.` : "No unresolved conflicts."}` });
+        const pullSummary = `Downloaded/merged ${downloads.length} · Already current ${pullSkipped} · Auto-resolved ${autoResolvedCount}`;
+        setGitHubProgress((current) => current ? { ...current, status: "success", title: "GitHub Pull Complete", processed: pullTotal, total: pullTotal, skipped: pullSkipped, logs: [...current.logs, pullSummary].slice(-8) } : current);
+        if (!options.silent) await dialogs.alert({ title: "GitHub pull complete", message: `Merged ${downloads.length} changed files from GitHub. Automatically resolved ${autoResolvedCount} conflict(s); recovery copies were saved on this device.` });
       } else {
         reportGitHubProgress("Scanning local backup data…");
         let snapshot = await collectAlleviateGitHubFiles();
@@ -534,33 +544,41 @@ export default function AppSidebar({ active }: { active: AppSection }) {
             throw new Error("No Alleviate manifest was found, but this GitHub backup folder already contains files. Push was stopped to protect them. Use Pull to restore a legacy backup, or choose an empty backup folder in GitHub settings.");
           }
         }
+        let autoResolvedCount = 0;
         if (previousManifest && action !== "hard-push") {
           const localByPath = new Map(snapshot.map((file) => [file.path, file]));
           const remoteMerges: Array<{ path: string; blob: Blob }> = [];
           const checkpoints: Array<{ path: string; blob: Blob }> = [];
-          const conflicts: string[] = [];
           let mergeProcessed = 0;
           reportGitHubProgress(`Comparing ${Object.keys(previousManifest.files).length} remote files before upload…`, { total: Object.keys(previousManifest.files).length, processed: 0 });
           for (const [path, remoteHash] of Object.entries(previousManifest.files)) {
             reportGitHubProgress(`Checking remote changes · ${path}`);
+            if (isSensitiveGitHubBackupPath(path)) {
+              await stageGitHubOutbox(path, undefined);
+              await clearGitHubConflict(path);
+              mergeProcessed += 1;
+              reportGitHubProgress(`Excluded sensitive credential from backup · ${path}`, { processed: mergeProcessed });
+              continue;
+            }
             const local = localByPath.get(path)?.blob;
             const base = await getGitHubCheckpoint(path);
             await stageGitHubOutbox(path, local);
             const localHash = local ? await hashBlob(local) : undefined;
-            if (localHash === remoteHash) { checkpoints.push({ path, blob: local! }); mergeProcessed += 1; reportGitHubProgress(`Already current · ${path}`, { processed: mergeProcessed }); continue; }
+            if (localHash === remoteHash) { checkpoints.push({ path, blob: local! }); await clearGitHubConflict(path); mergeProcessed += 1; reportGitHubProgress(`Already current · ${path}`, { processed: mergeProcessed }); continue; }
             const remote = await requestGitHubFile("GET", username, config, [rootPath, path].filter(Boolean).join("/"), undefined, true) as Blob;
-            const merged = await mergeGitHubFile(path, base, local, remote);
+            const merged = await mergeGitHubFile(path, base, local, remote, "local");
             if (merged.conflict) {
-              await saveGitHubConflict(path, base, local, remote, merged.reason || "The changes need manual review.");
-              conflicts.push(path);
-            } else {
-              if (merged.blob && (!local || await hashBlob(merged.blob) !== localHash)) remoteMerges.push({ path, blob: merged.blob });
-              checkpoints.push({ path, blob: remote });
+              autoResolvedCount += 1;
+              await saveGitHubRecoveryCopy(path, base, local, remote, merged.reason || "Push chose this device's version for the conflicting file.");
+              reportGitHubProgress(`Auto-resolved conflict · kept this device · ${path}`);
+              await clearGitHubConflict(path);
             }
+            await clearGitHubConflict(path);
+            if (merged.blob && (!local || await hashBlob(merged.blob) !== localHash)) remoteMerges.push({ path, blob: merged.blob });
+            checkpoints.push({ path, blob: remote });
             mergeProcessed += 1;
-            reportGitHubProgress(merged.conflict ? `Saved conflict · ${path}` : `Compared · ${path}`, { processed: mergeProcessed });
+            if (!merged.conflict) reportGitHubProgress(`Compared · ${path}`, { processed: mergeProcessed });
           }
-          if (conflicts.length) throw new Error(`Push stopped to protect conflicting data. ${conflicts.length} file(s) were saved for recovery: ${conflicts.slice(0, 5).join(", ")}. Pull or resolve these changes before pushing again.`);
           if (remoteMerges.length) await applyAlleviateGitHubChanges(remoteMerges);
           for (const checkpoint of checkpoints) await saveGitHubCheckpoint(checkpoint.path, checkpoint.blob, false);
           // Pull files created by another device since this device's last sync.
@@ -590,6 +608,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           reportGitHubProgress(`Checking ${file.path}…`);
           if (action !== "hard-push" && previousHashes[file.path] === file.hash) {
             await saveGitHubCheckpoint(file.path, file.blob, true);
+            await clearGitHubConflict(file.path);
             fileProcessed += 1; fileSkipped += 1;
             reportGitHubProgress(`Unchanged · ${file.path}`, { processed: fileProcessed, skipped: fileSkipped });
             continue;
@@ -603,10 +622,12 @@ export default function AppSidebar({ active }: { active: AppSection }) {
               metadata = await requestGitHubFile("GET", username, config, [rootPath, file.path].filter(Boolean).join("/")) as { sha?: string };
               remote = await requestGitHubFile("GET", username, config, [rootPath, file.path].filter(Boolean).join("/"), undefined, true) as Blob;
             } catch (error) { if ((error as Error & { status?: number }).status !== 404) throw error; }
-            const desired = action === "hard-push" ? { blob: file.blob, conflict: false } : await mergeGitHubFile(file.path, base, file.blob, remote);
+            const desired = action === "hard-push" ? { blob: file.blob, conflict: false } : await mergeGitHubFile(file.path, base, file.blob, remote, "local");
             if (desired.conflict) {
-              await saveGitHubConflict(file.path, base, file.blob, remote, desired.reason || "The changes need manual review.");
-              throw new Error(`Push stopped to protect ${file.path}. ${desired.reason || "Both devices changed this file."} Your local and remote versions were kept.`);
+              autoResolvedCount += 1;
+              await saveGitHubRecoveryCopy(file.path, base, file.blob, remote, desired.reason || "Push chose this device's version for the conflicting file.");
+              await clearGitHubConflict(file.path);
+              reportGitHubProgress(`Auto-resolved conflict · kept this device · ${file.path}`);
             }
             if (!desired.blob) throw new Error(`Could not produce a safe version for ${file.path}.`);
             const desiredHash = await hashBlob(desired.blob);
@@ -657,7 +678,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           reportGitHubProgress(`Checking removed local file · ${path}`);
           await stageGitHubOutbox(path, undefined);
           const base = await getGitHubCheckpoint(path);
-          if (action !== "hard-push" && (!base || await hashBlob(base) !== previousHashes[path])) {
+          if (action !== "hard-push" && !isSensitiveGitHubBackupPath(path) && (!base || await hashBlob(base) !== previousHashes[path])) {
             // A device without a checkpoint cannot prove that absence means a deliberate deletion.
             nextHashes[path] = previousHashes[path];
             continue;
@@ -671,11 +692,10 @@ export default function AppSidebar({ active }: { active: AppSection }) {
                 remote = await requestGitHubFile("GET", username, config, [rootPath, path].filter(Boolean).join("/")) as { sha?: string };
                 remoteBlob = await requestGitHubFile("GET", username, config, [rootPath, path].filter(Boolean).join("/"), undefined, true) as Blob;
               } catch (error) { if ((error as Error & { status?: number }).status === 404) { removed = true; break; } throw error; }
-              if (action !== "hard-push" && (!base || await hashBlob(remoteBlob) !== await hashBlob(base))) {
-                await saveGitHubConflict(path, base, undefined, remoteBlob, "This device deleted the file while GitHub had newer changes.");
-                nextHashes[path] = await hashBlob(remoteBlob);
-                removed = true;
-                continue;
+              if (action !== "hard-push" && !isSensitiveGitHubBackupPath(path) && (!base || await hashBlob(remoteBlob) !== await hashBlob(base))) {
+                autoResolvedCount += 1;
+                await saveGitHubRecoveryCopy(path, base, undefined, remoteBlob, "Push deleted this remote-only file; its contents were saved locally for recovery.");
+                reportGitHubProgress(`Auto-resolved deletion · saved remote copy for recovery · ${path}`);
               }
               try {
                 await assertRemoteLock();
@@ -736,9 +756,9 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           }
           if (!published) throw new Error("Could not publish the latest sync manifest. Your local files remain saved and can be synced again.");
         }
-        const pushSummary = `Uploaded ${fileUploaded} · Unchanged ${fileSkipped} · Removed ${deleted.length}`;
+        const pushSummary = `Uploaded ${fileUploaded} · Unchanged ${fileSkipped} · Removed ${deleted.length} · Auto-resolved ${autoResolvedCount}`;
         setGitHubProgress((current) => current ? { ...current, status: "success", title: action === "hard-push" ? "GitHub Hard Push Complete" : "GitHub Push Complete", processed: current.total, uploaded: fileUploaded, skipped: fileSkipped, logs: [...current.logs, pushSummary].slice(-8) } : current);
-        if (!options.silent) await dialogs.alert({ title: action === "hard-push" ? "Hard push complete" : "GitHub sync complete", message: `Uploaded ${pushed} changed files${deleted.length ? ` and removed ${deleted.length} deleted files` : ""}. Unchanged files were skipped.` });
+        if (!options.silent) await dialogs.alert({ title: action === "hard-push" ? "Hard push complete" : "GitHub sync complete", message: `Uploaded ${pushed} changed files${deleted.length ? ` and removed ${deleted.length} deleted files` : ""}. Automatically resolved ${autoResolvedCount} conflict(s); recovery copies were saved on this device. Unchanged files were skipped.` });
       }
       if (action !== "pull") {
         const syncedAt = Date.now();
@@ -747,6 +767,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
       }
       setGitHubError("");
       setGitHubNeedsSettings(false);
+      setGitHubConflicts(await listGitHubConflicts());
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not complete the GitHub action.";

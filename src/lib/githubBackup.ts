@@ -16,6 +16,15 @@ const WORKSPACE_KEY = "alleviate-canvas-workspace-v1";
 const MAPS_KEY = "alleviate-wisemapping-maps-v1";
 const SYNC_STATE_KEY = "alleviate-github-sync-state-v1";
 const ignoredKeys = new Set([CANVAS_KEY, WORKSPACE_KEY, MAPS_KEY, SYNC_STATE_KEY, "alleviate_current_user", "alleviate-auto-backup-settings-v1"]);
+const isSensitiveStorageKey = (key: string) => /(?:access|refresh|id|auth|github)[_-]?token|password|secret|credential|api[_-]?key|oauth/i.test(key);
+export function isSensitiveGitHubBackupPath(path: string) {
+  const parts = path.split("/");
+  try {
+    if (parts[0] === "app-data" && parts[1]?.endsWith(".json")) return isSensitiveStorageKey(fromPathId(parts[1].slice(0, -5)));
+    if (parts[0] === "mind-maps" && parts[1] === "state" && parts[2]?.endsWith(".json")) return isSensitiveStorageKey(fromPathId(parts[2].slice(0, -5)));
+  } catch { return false; }
+  return false;
+}
 const textBlob = (value: string) => new Blob([value], { type: "application/json;charset=utf-8" });
 const pathId = (value: string) => {
   const bytes = new TextEncoder().encode(value);
@@ -152,6 +161,10 @@ export async function saveGitHubConflict(path: string, base: Blob | undefined, l
   await saveSyncRecord({ key: syncRecordKey("conflict", path), base, local, remote, message: reason, updatedAt: new Date().toISOString() });
 }
 
+export async function saveGitHubRecoveryCopy(path: string, base: Blob | undefined, local: Blob | undefined, remote: Blob | undefined, reason: string) {
+  await saveSyncRecord({ key: syncRecordKey("recovery", path), base, local, remote, message: reason, updatedAt: new Date().toISOString() });
+}
+
 export async function listGitHubConflicts(): Promise<Array<{ path: string; message: string; local?: Blob; remote?: Blob }>> {
   const db = await openSyncDatabase();
   return new Promise((resolve, reject) => {
@@ -168,7 +181,7 @@ function hasIdArray(value: unknown): value is Array<Record<string, unknown>> {
   return Array.isArray(value) && value.every((item) => item && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string");
 }
 
-function mergeJson(base: any, local: any, remote: any, location: string, conflicts: string[]): any {
+function mergeJson(base: any, local: any, remote: any, location: string, conflicts: string[], prefer: "local" | "remote"): any {
   if (sameJson(local, remote)) return local;
   if (sameJson(local, base)) return remote;
   if (sameJson(remote, base)) return local;
@@ -176,14 +189,26 @@ function mergeJson(base: any, local: any, remote: any, location: string, conflic
     try {
       const parsedBase = JSON.parse(base); const parsedLocal = JSON.parse(local); const parsedRemote = JSON.parse(remote);
       if (typeof parsedBase !== "string" || typeof parsedLocal !== "string" || typeof parsedRemote !== "string") {
-        return JSON.stringify(mergeJson(parsedBase, parsedLocal, parsedRemote, location, conflicts));
+        return JSON.stringify(mergeJson(parsedBase, parsedLocal, parsedRemote, location, conflicts, prefer));
       }
     } catch { /* Plain text values are compared as a single field. */ }
+  }
+  if (["$.canvasIds", "$.keys"].includes(location) && Array.isArray(base) && Array.isArray(local) && Array.isArray(remote)
+    && [...base, ...local, ...remote].every((item) => typeof item === "string")) {
+    const allValues = [...new Set([...local, ...remote])];
+    return allValues.filter((item) => {
+      const wasInBase = base.includes(item);
+      const inLocal = local.includes(item);
+      const inRemote = remote.includes(item);
+      if (inLocal === wasInBase) return inRemote;
+      if (inRemote === wasInBase) return inLocal;
+      return inLocal;
+    });
   }
   if (base && local && remote && typeof base === "object" && typeof local === "object" && typeof remote === "object" && !Array.isArray(base) && !Array.isArray(local) && !Array.isArray(remote)) {
     const merged: Record<string, unknown> = {};
     for (const key of new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(remote)])) {
-      const value = mergeJson(base[key], local[key], remote[key], `${location}.${key}`, conflicts);
+      const value = mergeJson(base[key], local[key], remote[key], `${location}.${key}`, conflicts, prefer);
       if (value !== undefined) merged[key] = value;
     }
     return merged;
@@ -195,7 +220,7 @@ function mergeJson(base: any, local: any, remote: any, location: string, conflic
     const ids = new Set([...baseById.keys(), ...localById.keys(), ...remoteById.keys()]);
     const merged = new Map<string, Record<string, unknown>>();
     for (const id of ids) {
-      const item = mergeJson(baseById.get(id), localById.get(id), remoteById.get(id), `${location}[${id}]`, conflicts);
+      const item = mergeJson(baseById.get(id), localById.get(id), remoteById.get(id), `${location}[${id}]`, conflicts, prefer);
       if (item !== undefined) merged.set(id, item);
     }
     // Keep the local ordering, followed by remote-only additions, so separate additions survive deterministically.
@@ -203,15 +228,15 @@ function mergeJson(base: any, local: any, remote: any, location: string, conflic
     return order.map((id) => merged.get(id)).filter((item): item is Record<string, unknown> => Boolean(item));
   }
   conflicts.push(location);
-  return local;
+  return prefer === "remote" ? remote : local;
 }
 
-export async function mergeGitHubFile(path: string, base: Blob | undefined, local: Blob | undefined, remote: Blob | undefined): Promise<GitHubMergeResult> {
+export async function mergeGitHubFile(path: string, base: Blob | undefined, local: Blob | undefined, remote: Blob | undefined, prefer: "local" | "remote" = "local"): Promise<GitHubMergeResult> {
   if (!local && !remote) return { conflict: false };
   if (!local) {
     if (!base) return { blob: remote, conflict: false };
     if (!remote || await hashBlob(remote) === await hashBlob(base)) return { conflict: false };
-    return { conflict: true, reason: "This device deleted the file while GitHub had newer changes." };
+    return { blob: prefer === "remote" ? remote : undefined, conflict: true, reason: "This device deleted the file while GitHub had newer changes." };
   }
   if (!remote) {
     // A missing remote file cannot be used as the merged result. When there is
@@ -219,22 +244,34 @@ export async function mergeGitHubFile(path: string, base: Blob | undefined, loca
     // that known local version to GitHub. If both sides changed independently,
     // keep the existing conflict protection.
     if (!base || await hashBlob(local) === await hashBlob(base)) return { blob: local, conflict: false };
-    return { conflict: true, reason: "Remote file was deleted while this device had local changes." };
+    return { blob: prefer === "local" ? local : undefined, conflict: true, reason: "Remote file was deleted while this device had local changes." };
   }
   const localHash = await hashBlob(local); const remoteHash = await hashBlob(remote);
   if (localHash === remoteHash) return { blob: local, conflict: false };
-  if (!base) return { conflict: true, reason: "Both this device and GitHub created the file independently." };
+  if (!base) {
+    const indexField = path === "canvases/index.json" ? "canvasIds" : path === "mind-maps/state-index.json" ? "keys" : "";
+    if (indexField) {
+      try {
+        const [localIndex, remoteIndex] = await Promise.all([local.text(), remote.text()]).then((values) => values.map((value) => JSON.parse(value)));
+        if (Array.isArray(localIndex?.[indexField]) && Array.isArray(remoteIndex?.[indexField])
+          && [...localIndex[indexField], ...remoteIndex[indexField]].every((item) => typeof item === "string")) {
+          const merged = { ...remoteIndex, ...localIndex, [indexField]: [...new Set([...localIndex[indexField], ...remoteIndex[indexField]])] };
+          return { blob: new Blob([JSON.stringify(merged, null, 2)], { type: "application/json;charset=utf-8" }), conflict: false };
+        }
+      } catch { /* Invalid indexes remain conflicts for manual review. */ }
+    }
+    return { blob: prefer === "local" ? local : remote, conflict: true, reason: "Both this device and GitHub created the file independently." };
+  }
   const baseHash = await hashBlob(base);
   if (localHash === baseHash) return { blob: remote, conflict: false };
   if (remoteHash === baseHash) return { blob: local, conflict: false };
   try {
     const [baseJson, localJson, remoteJson] = await Promise.all([base.text(), local.text(), remote.text()]).then((values) => values.map((value) => JSON.parse(value)));
     const conflicts: string[] = [];
-    const merged = mergeJson(baseJson, localJson, remoteJson, "$", conflicts);
-    if (conflicts.length) return { conflict: true, reason: `Both devices changed the same data (${conflicts.slice(0, 4).join(", ")}).` };
-    return { blob: new Blob([JSON.stringify(merged, null, 2)], { type: "application/json;charset=utf-8" }), conflict: false };
+    const merged = mergeJson(baseJson, localJson, remoteJson, "$", conflicts, prefer);
+    return { blob: new Blob([JSON.stringify(merged, null, 2)], { type: "application/json;charset=utf-8" }), conflict: conflicts.length > 0, reason: conflicts.length ? `Both devices changed the same data (${conflicts.slice(0, 4).join(", ")}); kept the ${prefer === "local" ? "device" : "GitHub"} version.` : undefined };
   } catch {
-    return { conflict: true, reason: `Both devices changed ${path}; this file cannot be merged safely.` };
+    return { blob: prefer === "local" ? local : remote, conflict: true, reason: `Both devices changed ${path}; kept the ${prefer === "local" ? "device" : "GitHub"} version.` };
   }
 }
 
@@ -282,7 +319,7 @@ export async function collectAlleviateGitHubFiles(): Promise<GitHubBackupFile[]>
   mindMapStateKeys.forEach((key) => putJson(`mind-maps/state/${pathId(key)}.json`, { key, value: values.get(key) ?? "" }));
 
   for (const [key, value] of localEntries) {
-    if (ignoredKeys.has(key) || key === MAPS_KEY || key.startsWith("alleviate-wisemapping-") || key.startsWith("alleviate-resources-default-") || /^.+-xml$/.test(key) && maps.some((map: any) => `${map.id}-xml` === key)) continue;
+    if (ignoredKeys.has(key) || isSensitiveStorageKey(key) || key === MAPS_KEY || key.startsWith("alleviate-wisemapping-") || key.startsWith("alleviate-resources-default-") || /^.+-xml$/.test(key) && maps.some((map: any) => `${map.id}-xml` === key)) continue;
     putJson(`app-data/${pathId(key)}.json`, { key, value });
   }
 
@@ -360,10 +397,10 @@ export async function applyAlleviateGitHubChanges(downloads: Array<{ path: strin
       if (value?.map?.id) mindMapWrites.set(String(value.map.id), value);
     } else if (item.path.startsWith("mind-maps/state/") && item.path.endsWith(".json")) {
       const value = JSON.parse(await readBlobText(item.blob));
-      if (typeof value?.key === "string" && typeof value?.value === "string") localStorageWrites.set(value.key, value.value);
+      if (typeof value?.key === "string" && typeof value?.value === "string" && !isSensitiveStorageKey(value.key)) localStorageWrites.set(value.key, value.value);
     } else if (item.path.startsWith("app-data/") && item.path.endsWith(".json")) {
       const value = JSON.parse(await readBlobText(item.blob));
-      if (typeof value?.key === "string" && typeof value?.value === "string") localStorageWrites.set(value.key, value.value);
+      if (typeof value?.key === "string" && typeof value?.value === "string" && !isSensitiveStorageKey(value.key)) localStorageWrites.set(value.key, value.value);
     } else if (item.path === "books/pdfs/index.json") {
       pdfIndex = JSON.parse(await readBlobText(item.blob)).pdfs || [];
     } else if (item.path.startsWith("books/pdfs/") && item.path.endsWith(".pdf")) {
@@ -374,14 +411,14 @@ export async function applyAlleviateGitHubChanges(downloads: Array<{ path: strin
 
   for (const path of deletedPaths) {
     const parts = path.split("/");
-    if (parts[0] === "app-data" && parts[1]?.endsWith(".json")) { try { removedStorageKeys.add(fromPathId(parts[1].slice(0, -5))); } catch { /* Ignore unknown path encodings. */ } }
+    if (parts[0] === "app-data" && parts[1]?.endsWith(".json")) { try { const key = fromPathId(parts[1].slice(0, -5)); if (!isSensitiveStorageKey(key)) removedStorageKeys.add(key); } catch { /* Ignore unknown path encodings. */ } }
     if (parts[0] === "canvases" && parts[1] && parts[2] === "canvas.json") { try { removedCanvasIds.add(fromPathId(parts[1])); } catch { /* Ignore malformed IDs. */ } }
     if (parts[0] === "mind-maps" && parts[1] === "maps" && parts[2]?.endsWith(".json")) { try { removedMindMapIds.add(fromPathId(parts[2].slice(0, -5))); } catch { /* Ignore malformed IDs. */ } }
     if (parts[0] === "books" && parts[1] === "pdfs" && parts[2]?.endsWith(".pdf")) { try { removedPdfIds.add(fromPathId(parts[2].slice(0, -4))); } catch { /* Ignore malformed IDs. */ } }
     if (parts[0] === "canvases" && parts[2] === "images" && parts[3] && parts[3] !== "index.json") {
       try { const filename = parts[3]; const extensionAt = filename.lastIndexOf("."); if (extensionAt > 0) removedCanvasImageKeys.add(`${fromPathId(parts[1])}:${fromPathId(filename.slice(0, extensionAt))}`); } catch { /* Ignore malformed IDs. */ }
     }
-    if (parts[0] === "mind-maps" && parts[1] === "state" && parts[2]?.endsWith(".json")) { try { removedStorageKeys.add(fromPathId(parts[2].slice(0, -5))); } catch { /* Ignore malformed keys. */ } }
+    if (parts[0] === "mind-maps" && parts[1] === "state" && parts[2]?.endsWith(".json")) { try { const key = fromPathId(parts[2].slice(0, -5)); if (!isSensitiveStorageKey(key)) removedStorageKeys.add(key); } catch { /* Ignore malformed keys. */ } }
   }
 
   const currentCanvases = await loadCanvasDocuments<any>().catch(() => {
