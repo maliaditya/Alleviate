@@ -5,7 +5,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Activity, ArrowDownUp, BookOpen, CalendarDays, Check, CheckSquare, Download, ExternalLink, FolderOpen, Github, Grid2X2, HeartHandshake, Home, Hourglass, LoaderCircle, Network, Pencil, RefreshCw, Settings2, Upload, X, GitPullRequest, UploadCloud } from "lucide-react";
 import { useAppDialogs } from "./AppDialogs";
 import { createAppBackup, downloadAppBackup, parseAppBackup, restoreAppBackup } from "../lib/appBackup";
-import { applyAlleviateGitHubChanges, clearGitHubConflict, collectAlleviateGitHubFiles, encodeBlobBase64, getGitHubCheckpoint, getGitHubLastSyncAt, hashBlob, listGitHubConflicts, mergeGitHubFile, saveGitHubCheckpoint, saveGitHubConflict, saveGitHubLastSyncAt, setGitHubSyncScope, stageGitHubOutbox, type GitHubBackupManifest } from "../lib/githubBackup";
+import { applyAlleviateGitHubChanges, clearGitHubConflict, collectAlleviateGitHubFiles, decodeBase64Blob, encodeBlobBase64, getGitHubCheckpoint, getGitHubLastSyncAt, hashBlob, listGitHubConflicts, mergeGitHubFile, saveGitHubCheckpoint, saveGitHubConflict, saveGitHubLastSyncAt, setGitHubSyncScope, stageGitHubOutbox, type GitHubBackupManifest } from "../lib/githubBackup";
 
 type AppSection = "home" | "canvas" | "books" | "mind-map" | "feedback-loop" | "countdown" | "calendar" | "eisenhower" | "tasks" | "tracking" | "support";
 type AutoBackupSettings = { directoryPath: string; lastRunWeek: string; lastRunAt: string; lastFilePath: string };
@@ -286,6 +286,17 @@ export default function AppSidebar({ active }: { active: AppSection }) {
     return response.json().catch(() => ({}));
   };
 
+  const requestGitHubManifest = async (username: string, config: GitHubSettings, manifestPath: string) => {
+    const file = await requestGitHubFile("GET", username, config, manifestPath) as { content?: unknown; encoding?: unknown; sha?: unknown };
+    if (typeof file.content !== "string" || file.encoding !== "base64") {
+      throw new Error("GitHub returned a manifest file in an unsupported encoding. No data was changed.");
+    }
+    let manifest: unknown;
+    try { manifest = JSON.parse(await decodeBase64Blob(file.content, "application/json").text()); }
+    catch { throw new Error("The GitHub backup manifest is not valid JSON. No data was changed."); }
+    return { manifest: manifest as GitHubBackupManifest, sha: typeof file.sha === "string" ? file.sha : undefined };
+  };
+
   const runGitHubAction = async (action: "pull" | "push" | "hard-push", options: { silent?: boolean } = {}): Promise<boolean> => {
     if (githubActionInFlightRef.current) return false;
     githubActionInFlightRef.current = true;
@@ -297,7 +308,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
       if (action === "pull") {
         let remoteManifest: GitHubBackupManifest;
         try {
-          remoteManifest = await requestGitHubFile("GET", username, config, manifestPath) as GitHubBackupManifest;
+          remoteManifest = (await requestGitHubManifest(username, config, manifestPath)).manifest;
         } catch (error) {
           if ((error as Error & { status?: number }).status !== 404) throw error;
           const legacy = await requestGitHubFile("GET", username, config, legacyFilePath) as { content?: string; encoding?: string };
@@ -356,7 +367,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
         let snapshot = await collectAlleviateGitHubFiles();
         for (const file of snapshot) await stageGitHubOutbox(file.path, file.blob);
         const previousManifest = await (async () => {
-          try { return await requestGitHubFile("GET", username, config, manifestPath) as GitHubBackupManifest; }
+          try { return (await requestGitHubManifest(username, config, manifestPath)).manifest; }
           catch (error) { if ((error as Error & { status?: number }).status === 404) return null; throw error; }
         })();
         if (previousManifest && !isValidBackupManifest(previousManifest)) throw new Error("This GitHub backup manifest is unsafe or uses a format this app does not support. Push was stopped and no data was changed. Open GitHub settings to choose a different backup folder.");
@@ -495,8 +506,8 @@ export default function AppSidebar({ active }: { active: AppSection }) {
             let latest: GitHubBackupManifest | null = null;
             let manifestFileSha: string | undefined;
             try {
-              const remote = await requestGitHubFile("GET", username, config, manifestPath) as GitHubBackupManifest & { sha?: string };
-              latest = remote;
+              const remote = await requestGitHubManifest(username, config, manifestPath);
+              latest = remote.manifest;
               manifestFileSha = remote.sha;
             } catch (error) { if ((error as Error & { status?: number }).status !== 404) throw error; }
             if (latest && !isValidBackupManifest(latest)) throw new Error("The remote manifest changed to an unsafe or unsupported format during sync.");
@@ -509,7 +520,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
             if (manifestFileSha) payload.sha = manifestFileSha;
             try {
               await requestGitHubFile("PUT", username, config, manifestPath, payload);
-              const verified = await requestGitHubFile("GET", username, config, manifestPath) as GitHubBackupManifest;
+              const verified = (await requestGitHubManifest(username, config, manifestPath)).manifest;
               if (verified.format !== "alleviate-github-backup" || verified.version !== 1) throw new Error("GitHub returned an invalid manifest after the write.");
               pushed += 1;
               published = true;
