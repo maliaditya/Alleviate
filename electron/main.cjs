@@ -106,21 +106,33 @@ function registerDesktopAuthIpc() {
       const target = new URL(String(payload?.url || ""));
       const allowedOrigin = new URL(AUTH_BASE_URL).origin;
       if (target.origin !== allowedOrigin) return { success: false, error: "Auth request origin is not allowed." };
-      if (!/^\/api\/auth\/(login|register|refresh|logout)$/.test(target.pathname)) {
-        return { success: false, error: "Auth route is not allowed." };
-      }
+      const routeMethods = {
+        "/api/auth/login": ["POST"],
+        "/api/auth/register": ["POST"],
+        "/api/auth/refresh": ["POST"],
+        "/api/auth/logout": ["POST"],
+        "/api/github-settings": ["GET", "POST"],
+        "/api/github-contents": ["GET", "PUT", "DELETE"],
+      };
+      const allowedMethods = routeMethods[target.pathname];
+      if (!allowedMethods) return { success: false, error: "App API route is not allowed." };
       const method = String(payload?.method || "POST").toUpperCase();
-      if (method !== "POST") return { success: false, error: "Auth requests must use POST." };
+      if (!allowedMethods.includes(method)) return { success: false, error: "App API method is not allowed for this route." };
       const headers = payload?.headers && typeof payload.headers === "object" ? payload.headers : {};
       const response = await fetch(target, {
         method,
         headers: { ...headers, "x-studio-desktop": "1" },
         body: typeof payload?.body === "string" ? payload.body : undefined,
       });
+      const contentType = response.headers.get("content-type") || "application/json; charset=utf-8";
+      if (payload?.responseType === "binary") {
+        const base64 = Buffer.from(await response.arrayBuffer()).toString("base64");
+        return { success: true, ok: response.ok, status: response.status, contentType, base64 };
+      }
       const text = await response.text();
       let data = null;
       try { data = text ? JSON.parse(text) : null; } catch { /* Preserve non-JSON response text below. */ }
-      return { success: true, ok: response.ok, status: response.status, data, text };
+      return { success: true, ok: response.ok, status: response.status, contentType, data, text };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
