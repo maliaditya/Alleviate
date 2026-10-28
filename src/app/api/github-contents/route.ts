@@ -102,6 +102,7 @@ async function forward(request: Request) {
           method: request.method,
           headers,
           body: request.method === 'GET' ? undefined : bodyText,
+          cache: 'no-store',
         });
         break;
       } catch (error) {
@@ -119,7 +120,7 @@ async function forward(request: Request) {
     const contentType = upstream.headers.get('content-type') || 'application/json; charset=utf-8';
     return new NextResponse(upstream.body, {
       status: upstream.status,
-      headers: { 'content-type': contentType },
+      headers: { 'content-type': contentType, 'cache-control': 'no-store, no-cache, must-revalidate' },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'GitHub proxy request failed.';

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import AppSidebar from "../AppSidebar";
 import FeedbackLoopCard from "./FeedbackLoopCard";
+import { syncFeedbackActionTitle } from "../lib/feedbackActionSync";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { ArrowLeft, ArrowRight, BarChart3, CalendarPlus, Check, Plus, Repeat2, Target, Trash2, Wrench } from "lucide-react";
 
@@ -111,6 +112,11 @@ export default function FeedbackLoopsPage() {
     try {
       localStorage.setItem(LOOPS_KEY, JSON.stringify(loops));
       window.dispatchEvent(new Event("feedback-loops-updated"));
+      Object.entries(loops).forEach(([object, loop]) => {
+        loop.actions?.forEach((action) => {
+          if (action.id && action.name?.trim()) syncFeedbackActionTitle(object, action.id, action.name);
+        });
+      });
     } catch { /* Keep the current session usable if storage is unavailable. */ }
   }, [loops, ready]);
 

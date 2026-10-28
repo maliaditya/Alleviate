@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { Activity, Apple, Baby, Banknote, BedDouble, Bike, BookOpen, Brain, Briefcase, BriefcaseBusiness, Building, Building2, Bus, Camera, Car, ChartNoAxesCombined, Check, ChevronDown, ChevronUp, Circle, CreditCard, Dumbbell, Flower2, Footprints, Gamepad2, GraduationCap, HandHeart, Heart, HeartHandshake, House, KeyRound, Laptop, Languages, Lightbulb, Mountain, MousePointer2, Music, NotebookPen, Palette, PiggyBank, Plane, Presentation, Receipt, Settings2, Sofa, Target, TrainFront, Trees, TrendingUp, Utensils, UserRound, Users, Wallet, Ticket, type LucideIcon } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { Activity, Apple, Baby, Banknote, BedDouble, Bike, BookOpen, Brain, Briefcase, BriefcaseBusiness, Building, Building2, Bus, Camera, Car, ChartNoAxesCombined, Check, ChevronDown, ChevronUp, Circle, CreditCard, Dumbbell, Flower2, Footprints, Gamepad2, GraduationCap, HandHeart, Heart, HeartHandshake, House, KeyRound, Laptop, Languages, Lightbulb, Maximize2, Minus, Mountain, MousePointer2, Music, NotebookPen, Palette, PiggyBank, Plane, Plus, Presentation, Receipt, Settings2, Sofa, Target, TrainFront, Trees, TrendingUp, Utensils, UserRound, Users, Wallet, Ticket, type LucideIcon } from "lucide-react";
+import { syncAllFeedbackActionTitles } from "./lib/feedbackActionSync";
 
 const RESOURCES_MAP_ID = "alleviate-resources-default";
 const OBJECTS_KEY = `${RESOURCES_MAP_ID}-objects`;
@@ -249,11 +250,19 @@ export default function ResourceMindMapPreview() {
   const [iconCategory, setIconCategory] = useState<IconCategory>("Wellbeing");
   const stageRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  const [viewBox, setViewBox] = useState("");
+  const viewBoxRef = useRef("");
+  const pointersRef = useRef(new Map<number, { x: number; y: number; type: string }>());
+  const gestureRef = useRef<{ kind: "pan" | "pinch"; x: number; y: number; view: [number, number, number, number]; distance?: number; centerX?: number; centerY?: number } | null>(null);
+  const movedRef = useRef(false);
+  const suppressNodeClickRef = useRef(false);
   const refresh = useCallback(() => setTopic(readResourceMap()), []);
+  const openNodeInTasks = (name: string) => window.location.assign(`/task-list?object=${encodeURIComponent(name)}`);
   const refreshFeedback = useCallback(() => {
     try {
       const stored = JSON.parse(localStorage.getItem(FEEDBACK_LOOPS_KEY) || "{}");
       setFeedbackLoops(stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {});
+      syncAllFeedbackActionTitles();
     } catch { setFeedbackLoops({}); }
   }, []);
   const refreshScheduledTasks = useCallback(() => {
@@ -306,22 +315,25 @@ export default function ResourceMindMapPreview() {
     };
   }, [refresh, refreshFeedback, refreshScheduledTasks, refreshScheduledQuadrants, refreshObjectIcons]);
 
+  const today = dateKey(new Date());
   const taskProgress = useMemo(() => {
     const idsByObject = new Map<string, Set<string>>();
     scheduledTasks.forEach((task) => {
       const objectKey = task.feedbackAction?.object?.trim().toLocaleLowerCase();
       const actionId = task.feedbackAction?.actionId;
-      if (!objectKey || !actionId) return;
+      if (!objectKey || !actionId || !scheduledOn(task, today)) return;
       const ids = idsByObject.get(objectKey) || new Set<string>();
       ids.add(actionId);
       idsByObject.set(objectKey, ids);
     });
     return Object.fromEntries(Array.from(idsByObject, ([objectKey, ids]) => {
-      const actions = feedbackLoops[objectKey]?.actions || [];
-      const completed = Array.from(ids).filter((id) => actions.find((action) => (action as { id?: string }).id === id)?.complete).length;
+      const completed = Array.from(ids).filter((id) => {
+        const todaysSchedules = scheduledTasks.filter((task) => task.feedbackAction?.object?.trim().toLocaleLowerCase() === objectKey && task.feedbackAction.actionId === id && scheduledOn(task, today));
+        return todaysSchedules.length > 0 && todaysSchedules.every((task) => task.completedDates?.includes(today));
+      }).length;
       return [objectKey, { completed, total: ids.size }];
     })) as TaskProgress;
-  }, [scheduledTasks, feedbackLoops]);
+  }, [scheduledTasks, today]);
   const expandedPanelHeights = useMemo(() => Object.fromEntries(expandedObjectIds.flatMap((id) => {
     const expandedTopic = findTopicById(topic, id);
     if (!expandedTopic) return [];
@@ -331,6 +343,98 @@ export default function ResourceMindMapPreview() {
     return height ? [[id, height] as const] : [];
   })), [topic, feedbackLoops, expandedObjectIds]);
   const layout = useMemo(() => topic ? layoutTree(topic, taskProgress, expandedPanelHeights) : null, [topic, taskProgress, expandedPanelHeights]);
+  useEffect(() => {
+    if (!layout?.viewBox) return;
+    viewBoxRef.current = layout.viewBox;
+    setViewBox(layout.viewBox);
+  }, [layout?.viewBox]);
+
+  const updateViewBox = (next: string) => { viewBoxRef.current = next; setViewBox(next); };
+  const zoomAt = (factor: number, clientX?: number, clientY?: number) => {
+    const stage = stageRef.current;
+    const base = layout?.viewBox;
+    const current = viewBoxRef.current;
+    if (!stage || !base || !current) return;
+    const values = current.split(/[ ,]+/).map(Number);
+    const baseValues = base.split(/[ ,]+/).map(Number);
+    if (values.length !== 4 || values.some((value) => !Number.isFinite(value))) return;
+    const [x, y, width, height] = values;
+    const [baseX, baseY, baseWidth, baseHeight] = baseValues;
+    const bounds = stage.getBoundingClientRect();
+    const nx = clientX === undefined ? .5 : Math.max(0, Math.min(1, (clientX - bounds.left) / bounds.width));
+    const ny = clientY === undefined ? .5 : Math.max(0, Math.min(1, (clientY - bounds.top) / bounds.height));
+    const nextWidth = Math.max(baseWidth * .28, Math.min(baseWidth * 4, width / factor));
+    const scale = nextWidth / width;
+    const nextHeight = height * scale;
+    const anchorX = x + nx * width;
+    const anchorY = y + ny * height;
+    updateViewBox(`${anchorX - nx * nextWidth} ${anchorY - ny * nextHeight} ${nextWidth} ${nextHeight}`);
+  };
+  const beginMapGesture = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest("button, a, input, [role='dialog'], .resource-map-hover-card")) return;
+    const pointers = pointersRef.current;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY, type: event.pointerType });
+    const values = viewBoxRef.current.split(/[ ,]+/).map(Number);
+    if (values.length !== 4 || values.some((value) => !Number.isFinite(value))) return;
+    if (pointers.size >= 2) {
+      const [first, second] = [...pointers.values()];
+      const centerX = (first.x + second.x) / 2;
+      const centerY = (first.y + second.y) / 2;
+      gestureRef.current = { kind: "pinch", x: centerX, y: centerY, view: values as [number, number, number, number], distance: Math.hypot(first.x - second.x, first.y - second.y), centerX, centerY };
+    } else {
+      gestureRef.current = { kind: "pan", x: event.clientX, y: event.clientY, view: values as [number, number, number, number] };
+    }
+    movedRef.current = false;
+  };
+  const moveMapGesture = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const pointer = pointersRef.current.get(event.pointerId);
+    if (!pointer) return;
+    pointersRef.current.set(event.pointerId, { ...pointer, x: event.clientX, y: event.clientY });
+    const gesture = gestureRef.current;
+    const stage = stageRef.current;
+    const base = layout?.viewBox.split(/[ ,]+/).map(Number);
+    if (!gesture || !stage || !base || base.length !== 4) return;
+    const bounds = stage.getBoundingClientRect();
+    if (gesture.kind === "pinch" && pointersRef.current.size >= 2) {
+      const [first, second] = [...pointersRef.current.values()];
+      const distance = Math.max(1, Math.hypot(first.x - second.x, first.y - second.y));
+      const midpointX = (first.x + second.x) / 2;
+      const midpointY = (first.y + second.y) / 2;
+      const startDistance = Math.max(1, gesture.distance || distance);
+      const [x, y, width, height] = gesture.view;
+      const nextWidth = Math.max(base[2] * .28, Math.min(base[2] * 4, width * startDistance / distance));
+      const scale = nextWidth / width;
+      const nx = (gesture.centerX! - bounds.left) / bounds.width;
+      const ny = (gesture.centerY! - bounds.top) / bounds.height;
+      const anchorX = x + nx * width;
+      const anchorY = y + ny * height;
+      const moveX = (midpointX - gesture.centerX!) * width / bounds.width;
+      const moveY = (midpointY - gesture.centerY!) * height / bounds.height;
+      updateViewBox(`${anchorX - nx * nextWidth - moveX} ${anchorY - ny * height * scale - moveY} ${nextWidth} ${height * scale}`);
+      movedRef.current = true;
+      event.preventDefault();
+      return;
+    }
+    const dx = event.clientX - gesture.x;
+    const dy = event.clientY - gesture.y;
+    if (Math.abs(dx) + Math.abs(dy) > 4) movedRef.current = true;
+    if (!movedRef.current) return;
+    const [x, y, width, height] = gesture.view;
+    updateViewBox(`${x - dx * width / bounds.width} ${y - dy * height / bounds.height} ${width} ${height}`);
+    event.preventDefault();
+  };
+  const endMapGesture = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const pointer = pointersRef.current.get(event.pointerId);
+    if (!pointer) return;
+    pointersRef.current.delete(event.pointerId);
+    if (movedRef.current) suppressNodeClickRef.current = true;
+    if (pointersRef.current.size === 1) {
+      const remaining = [...pointersRef.current.values()][0];
+      const values = viewBoxRef.current.split(/[ ,]+/).map(Number);
+      if (values.length === 4 && values.every(Number.isFinite)) gestureRef.current = { kind: "pan", x: remaining.x, y: remaining.y, view: values as [number, number, number, number] };
+    } else gestureRef.current = null;
+    window.setTimeout(() => { suppressNodeClickRef.current = false; }, 0);
+  };
   const hoveredNode = layout?.positions.find((node) => node.id === hoveredObject);
   const hoveredObjectKey = hoveredNode?.text.trim().toLocaleLowerCase() || "";
   const hoveredIconId = hoveredNode ? objectIcons[hoveredObjectKey] || DEFAULT_OBJECT_ICON_IDS[hoveredObjectKey] || "circle" : "circle";
@@ -343,7 +447,6 @@ export default function ResourceMindMapPreview() {
     setIconPickerOpen(false);
   };
   const feedback = hoveredNode?.isObject ? feedbackLoops[hoveredNode.text.trim().toLocaleLowerCase()] : undefined;
-  const today = dateKey(new Date());
   const currentWeekDays = getCurrentWeekDays();
   const objectKey = hoveredNode?.text.trim().toLocaleLowerCase();
   const actions = feedback?.actions?.filter((action) => (action?.name?.trim() || action?.details?.trim()) && action.id && scheduledTasks.some((task) => task.feedbackAction?.object?.trim().toLocaleLowerCase() === objectKey && task.feedbackAction?.actionId === action.id && scheduledOn(task, today))) || [];
@@ -386,15 +489,22 @@ export default function ResourceMindMapPreview() {
       }
     } catch { /* Leave the feedback card usable if browser storage is unavailable. */ }
   };
-  // Reserve enough SVG space for the heading and objective as well as the
-  // action rows. The old estimate only accounted for actions, so objective
-  // text could extend past the foreignObject and get clipped at the stage edge.
-  const cardHeight = Math.min(520, 190 + actions.length * 64 + (iconPickerOpen ? 128 : 0));
+  // Estimate the popup from its rendered content, with comfortable row spacing
+  // so the checklist is not cramped or clipped inside the card.
+  let cardWidth = 260;
+  const textLines = (value: string, charsPerLine: number) => Math.max(1, Math.ceil(value.trim().length / charsPerLine));
+  const actionRowsHeight = actions.reduce((height, action) => {
+    const name = action.name?.trim() || "Action";
+    const details = action.details?.trim() || "";
+    return height + 32 + (textLines(name, 34) - 1) * 16 + (details ? 6 + textLines(details, 42) * 14 : 0);
+  }, 0);
+  const objectiveHeight = objective ? 42 + (textLines(objective, 42) - 1) * 16 : 0;
+  let cardHeight = Math.min(560, 94 + objectiveHeight + (actions.length ? 26 + actionRowsHeight : 0) + (iconPickerOpen ? 148 : 0));
   let cardPosition: { x: number; y: number } | null = null;
   if (layout && hoveredNode && showFeedbackCard) {
     const [left, top, viewWidth, viewHeight] = layout.viewBox.split(" ").map(Number);
-    const cardWidth = 260;
     const padding = 24;
+    const gap = 18;
     // SVG coordinates are scaled and letterboxed by preserveAspectRatio="xMidYMid meet".
     // Clamp against the actually visible map area so the HTML popup cannot slide
     // beneath the fixed sidebar or beyond the stage on narrow screens.
@@ -415,24 +525,47 @@ export default function ResourceMindMapPreview() {
       visibleRight = lowerRight.x;
       visibleBottom = lowerRight.y;
     }
+    const visibleWidth = Math.max(1, visibleRight - visibleLeft);
+    const visibleHeight = Math.max(1, visibleBottom - visibleTop);
+    cardWidth = Math.min(cardWidth, visibleWidth);
+    cardHeight = Math.min(cardHeight, visibleHeight);
     const clampX = (x: number) => Math.max(visibleLeft, Math.min(visibleRight - cardWidth, x));
     const clampY = (y: number) => Math.max(visibleTop, Math.min(visibleBottom - cardHeight, y));
-    const candidates = [
-      { x: clampX(hoveredNode.x + hoveredNode.width / 2 + 18), y: clampY(hoveredNode.y + hoveredNode.height / 2 - cardHeight / 2) },
-      { x: clampX(hoveredNode.x - hoveredNode.width / 2 - cardWidth - 18), y: clampY(hoveredNode.y + hoveredNode.height / 2 - cardHeight / 2) },
-      { x: clampX(hoveredNode.x - cardWidth / 2), y: clampY(hoveredNode.y + hoveredNode.height + 18) },
-      { x: clampX(hoveredNode.x - cardWidth / 2), y: clampY(hoveredNode.y - cardHeight - 18) },
+    const nodeLeft = hoveredNode.x - hoveredNode.width / 2;
+    const nodeRight = hoveredNode.x + hoveredNode.width / 2;
+    const nodeTop = hoveredNode.y;
+    const nodeBottom = hoveredNode.y + hoveredNode.height;
+    const sideSpace = {
+      right: visibleRight - nodeRight - gap,
+      left: nodeLeft - gap - visibleLeft,
+      bottom: visibleBottom - nodeBottom - gap,
+      top: nodeTop - gap - visibleTop,
+    };
+    const makeCandidates = () => [
+      ...(sideSpace.right >= cardWidth ? [{ side: "right", x: nodeRight + gap, y: clampY(hoveredNode.y + hoveredNode.height / 2 - cardHeight / 2) }] : []),
+      ...(sideSpace.left >= cardWidth ? [{ side: "left", x: nodeLeft - cardWidth - gap, y: clampY(hoveredNode.y + hoveredNode.height / 2 - cardHeight / 2) }] : []),
+      ...(sideSpace.bottom >= cardHeight ? [{ side: "bottom", x: clampX(hoveredNode.x - cardWidth / 2), y: nodeBottom + gap }] : []),
+      ...(sideSpace.top >= cardHeight ? [{ side: "top", x: clampX(hoveredNode.x - cardWidth / 2), y: nodeTop - cardHeight - gap }] : []),
     ];
+    let candidates = makeCandidates();
+    if (!candidates.length) {
+      // On a narrow preview, shrink the card to fit the side with the most room
+      // rather than clamping it over the node.
+      const side = (Object.entries(sideSpace) as Array<[keyof typeof sideSpace, number]>).sort((a, b) => b[1] - a[1])[0]?.[0] || "right";
+      if (side === "right" || side === "left") cardWidth = Math.max(1, Math.min(cardWidth, Math.max(1, sideSpace[side])));
+      else cardHeight = Math.max(1, Math.min(cardHeight, Math.max(1, sideSpace[side])));
+      candidates = makeCandidates();
+    }
+    if (!candidates.length) candidates = [{ side: "right", x: clampX(nodeRight + gap), y: clampY(nodeTop) }];
     const overlapScore = (candidate: { x: number; y: number }) => {
       let score = layout.positions.reduce((total, node) => {
-        if (node.id === hoveredNode.id) return total;
         const nodeLeft = node.x - node.width / 2 - 12;
         const nodeRight = node.x + node.width / 2 + 12;
         const nodeTop = node.y - 12;
         const nodeBottom = node.y + node.height + 12;
         const overlapWidth = Math.max(0, Math.min(candidate.x + cardWidth, nodeRight) - Math.max(candidate.x, nodeLeft));
         const overlapHeight = Math.max(0, Math.min(candidate.y + cardHeight, nodeBottom) - Math.max(candidate.y, nodeTop));
-        return total + overlapWidth * overlapHeight * 5;
+        return total + overlapWidth * overlapHeight * (node.id === hoveredNode.id ? 10000 : 5);
       }, 0);
       const hoveredPanelHeight = expandedPanelHeights[hoveredNode.id] || 0;
       if (hoveredPanelHeight > 0) {
@@ -450,9 +583,14 @@ export default function ResourceMindMapPreview() {
 
   return (
     <section className="resource-map-preview" aria-label="Resources mind map preview">
-      <div ref={stageRef} className="resource-map-preview-stage" aria-label="Read-only Resources mind map">
-        <div className="resource-map-interaction-hint"><MousePointer2 size={13} /><span>Hover for feedback · expand an object for weekly actions</span></div>
-        {layout && <svg ref={svgRef} className="resource-map-svg" viewBox={layout.viewBox} preserveAspectRatio="xMidYMid meet" role="img" onMouseLeave={() => setHoveredObject(null)} aria-label={`Resources mind map centered on ${topic?.text || "You"}`}>
+      <div ref={stageRef} className="resource-map-preview-stage" aria-label="Interactive Resources mind map" onPointerDown={beginMapGesture} onPointerMove={moveMapGesture} onPointerUp={endMapGesture} onPointerCancel={endMapGesture} onWheel={(event) => { if ((event.target as HTMLElement).closest(".resource-map-hover-card")) return; event.preventDefault(); zoomAt(Math.exp(-event.deltaY * .0015), event.clientX, event.clientY); }}>
+        <div className="resource-map-interaction-hint"><MousePointer2 size={13} /><span>Drag to pan · pinch or scroll to zoom · select an object for details</span></div>
+        <div className="resource-map-zoom-controls" role="group" aria-label="Mind map zoom controls">
+          <button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => zoomAt(1.25)}><Plus size={16}/></button>
+          <button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => zoomAt(.8)}><Minus size={16}/></button>
+          <button type="button" aria-label="Reset map view" title="Reset view" onClick={() => layout && updateViewBox(layout.viewBox)}><Maximize2 size={14}/></button>
+        </div>
+        {layout && <svg ref={svgRef} className="resource-map-svg" viewBox={viewBox || layout.viewBox} preserveAspectRatio="xMidYMid meet" role="img" onMouseLeave={() => setHoveredObject(null)} aria-label={`Resources mind map centered on ${topic?.text || "You"}`}>
           <g className="resource-map-links">{layout.links.map(({ from, to }) => {
             const direction = Math.sign(to.x - from.x) || 1;
             const x1 = from.x + direction * from.width / 2;
@@ -471,9 +609,11 @@ export default function ResourceMindMapPreview() {
             const nodeExpanded = Boolean(expandedPanelHeights[node.id]) && nodeActions.length > 0;
             const nodeEvents = nodeExpanded ? scheduledTasks.filter((task) => task.feedbackAction?.object?.trim().toLocaleLowerCase() === key) : [];
             return <g key={node.id} className={`${node.id === topic?.id ? "is-root" : ""} ${node.isObject ? "resource-map-object" : ""}`} transform={`translate(${node.x - node.width / 2} ${node.y})`}
+              role="link" aria-label={`Open ${node.text} in Tasks`} tabIndex={0} onClick={(event) => { if (suppressNodeClickRef.current) { event.preventDefault(); event.stopPropagation(); suppressNodeClickRef.current = false; return; } openNodeInTasks(node.text); }}
+              onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openNodeInTasks(node.text); } }}
               onMouseEnter={() => node.isObject && setHoveredObject(node.id)}
               onFocus={() => node.isObject && setHoveredObject(node.id)}
-              onBlur={(event) => { if (node.isObject && !event.currentTarget.ownerSVGElement?.contains(event.relatedTarget as Node | null)) setHoveredObject(null); }} tabIndex={node.isObject ? 0 : undefined}>
+              onBlur={(event) => { if (node.isObject && !event.currentTarget.ownerSVGElement?.contains(event.relatedTarget as Node | null)) setHoveredObject(null); }}>
             {node.id === topic?.id && <rect className="resource-map-root-outline" x="-5" y="-5" width={node.width + 10} height={node.height + 10} rx="14" />}
             <rect className={node.id === topic?.id ? "resource-map-root-node" : "resource-map-branch-node"} width={node.width} height={node.height} rx="11" style={node.id === topic?.id ? undefined : { fill: node.color }} />
             {ObjectIcon && <ObjectIcon className="resource-map-object-icon" x={10} y={9} width={18} height={18} strokeWidth={2} color="#fff" aria-hidden="true" />}
@@ -518,7 +658,7 @@ export default function ResourceMindMapPreview() {
               </foreignObject>
             </g>;
           })}
-          {hoveredNode && showFeedbackCard && cardPosition && <foreignObject className="resource-map-hover-card" x={cardPosition.x} y={cardPosition.y} width="260" height={cardHeight}>
+          {hoveredNode && showFeedbackCard && cardPosition && <foreignObject className="resource-map-hover-card" x={cardPosition.x} y={cardPosition.y} width={cardWidth} height={cardHeight}>
             <div className="resource-map-hover-card-content">
               <div className="resource-map-hover-card-heading"><span className="resource-map-hover-card-dot" style={{ background: hoveredNode.color }} /><div><small>FEEDBACK LOOP</small><strong>{hoveredNode.text}</strong></div>{objectActions.length > 0 && <button type="button" className={`resource-map-icon-settings ${expandedPanelHeights[hoveredNode.id] ? "is-expanded" : ""}`} title={`${expandedPanelHeights[hoveredNode.id] ? "Hide" : "Show"} actions on the mind map`} aria-label={`${expandedPanelHeights[hoveredNode.id] ? "Hide" : "Show"} actions on the mind map`} aria-expanded={Boolean(expandedPanelHeights[hoveredNode.id])} onClick={() => { setIconPickerOpen(false); setExpandedObjectIds((current) => current.includes(hoveredNode.id) ? current.filter((id) => id !== hoveredNode.id) : [...current, hoveredNode.id]); }}>{expandedPanelHeights[hoveredNode.id] ? <ChevronUp size={15} /> : <ChevronDown size={15} />}</button>}<button type="button" className="resource-map-icon-settings" title="Choose object icon" aria-label={`Choose icon for ${hoveredNode.text}`} aria-expanded={iconPickerOpen} onClick={() => { if (!iconPickerOpen) setIconCategory(ICON_CATEGORY_BY_OBJECT[hoveredObjectKey] || "Wellbeing"); setIconPickerOpen((open) => !open); }}><Settings2 size={15} /></button></div>
               {iconPickerOpen && <div className="resource-map-icon-picker-panel">
@@ -527,9 +667,11 @@ export default function ResourceMindMapPreview() {
               </div>}
               {objective && <div className="resource-map-hover-objective"><small>OBJECTIVE{feedback?.objectiveType ? ` · ${feedback.objectiveType}` : ""}</small><p>{objective}</p></div>}
               {actions.length > 0 && <div className="resource-map-hover-actions"><small>ACTIONS · {actions.length}</small>{actions.map((action, index) => {
-                const scheduledTask = scheduledTasks.find((task) => task.feedbackAction?.object?.trim().toLocaleLowerCase() === objectKey && task.feedbackAction?.actionId === action.id && scheduledOn(task, today));
+                const todaysSchedules = scheduledTasks.filter((task) => task.feedbackAction?.object?.trim().toLocaleLowerCase() === objectKey && task.feedbackAction?.actionId === action.id && scheduledOn(task, today));
+                const actionComplete = todaysSchedules.length > 0 && todaysSchedules.every((task) => task.completedDates?.includes(today));
+                const scheduledTask = todaysSchedules[0];
                 const accent = QUADRANT_COLORS[scheduledTask?.id ? scheduledQuadrants[scheduledTask.id] || "eliminate" : "eliminate"] || QUADRANT_COLORS.eliminate;
-                return <div className={`resource-map-hover-action ${action.complete ? "is-complete" : ""}`} key={`${hoveredNode.id}-action-${action.id || index}`}><button type="button" className={`resource-map-action-check ${action.complete ? "is-checked" : ""}`} style={{ "--action-quadrant-color": accent } as CSSProperties} disabled={!action.id} aria-pressed={Boolean(action.complete)} aria-label={`${action.complete ? "Mark incomplete" : "Mark complete"}: ${action.name || "Action"}`} onClick={(event) => { event.stopPropagation(); toggleAction(hoveredNode.text, action.id || "", !action.complete); }}>{action.complete && <Check size={11} />}</button><div><strong>{action.name || "Action"}</strong>{action.details && <p>{action.details}</p>}</div></div>;
+                return <div className={`resource-map-hover-action ${actionComplete ? "is-complete" : ""}`} key={`${hoveredNode.id}-action-${action.id || index}`}><button type="button" className={`resource-map-action-check ${actionComplete ? "is-checked" : ""}`} style={{ "--action-quadrant-color": accent } as CSSProperties} disabled={!action.id} aria-pressed={actionComplete} aria-label={`${actionComplete ? "Mark incomplete" : "Mark complete"}: ${action.name || "Action"}`} onClick={(event) => { event.stopPropagation(); toggleAction(hoveredNode.text, action.id || "", !actionComplete); }}>{actionComplete && <Check size={11} />}</button><div><strong>{action.name || "Action"}</strong>{action.details && <p>{action.details}</p>}</div></div>;
               })}</div>}
             </div>
           </foreignObject>}

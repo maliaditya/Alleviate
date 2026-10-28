@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Activity, ArrowDownUp, BookOpen, CalendarDays, Check, CheckSquare, Download, ExternalLink, FolderOpen, Github, Grid2X2, HeartHandshake, Home, Hourglass, LoaderCircle, Network, Pencil, RefreshCw, Settings2, Upload, X, GitPullRequest, UploadCloud } from "lucide-react";
+import { Activity, ArrowDownUp, CalendarDays, Check, CheckSquare, Download, ExternalLink, FolderOpen, Github, Grid2X2, Home, Hourglass, LoaderCircle, Pencil, RefreshCw, Settings2, Upload, X, GitPullRequest, UploadCloud } from "lucide-react";
 import { useAppDialogs } from "./AppDialogs";
 import { createAppBackup, downloadAppBackup, parseAppBackup, restoreAppBackup } from "../lib/appBackup";
 import { requestAppApi } from "../lib/desktopAuth";
@@ -27,14 +27,11 @@ const todayDateValue = () => { const today = new Date(); return `${today.getFull
 const items: Array<{ id: AppSection; href: string; label: string; Icon: typeof Home }> = [
   { id: "home", href: "/", label: "Home", Icon: Home },
   { id: "tasks", href: "/task-list", label: "Tasks", Icon: CheckSquare },
-  { id: "tracking", href: "/tasks", label: "Tracking", Icon: Activity },
-  { id: "calendar", href: "/calendar", label: "Calendar", Icon: CalendarDays },
-  { id: "mind-map", href: "/mind-map", label: "Mind Maps", Icon: Network },
   { id: "eisenhower", href: "/eisenhower", label: "Eisenhower Matrix", Icon: Grid2X2 },
   { id: "canvas", href: "/canvas", label: "Canvas", Icon: Pencil },
-  { id: "books", href: "/books", label: "Books", Icon: BookOpen },
+  { id: "tracking", href: "/tasks", label: "Tracking", Icon: Activity },
+  { id: "calendar", href: "/calendar", label: "Calendar", Icon: CalendarDays },
   { id: "countdown", href: "/countdown", label: "Countdown", Icon: Hourglass },
-  { id: "support", href: "/support", label: "Support Alleviate", Icon: HeartHandshake },
 ];
 
 export default function AppSidebar({ active }: { active: AppSection }) {
@@ -71,6 +68,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
     try { return String(JSON.parse(localStorage.getItem("alleviate_current_user") || "null")?.username || "").trim().toLowerCase(); }
     catch { return ""; }
   };
+  const githubAutoSyncPauseKey = `alleviate-github-auto-sync-paused-v1:${encodeURIComponent(githubSyncScopeKey || "default")}`;
 
   const reportGitHubProgress = (message: string, metrics?: Partial<Pick<GitHubSyncProgress, "processed" | "total" | "uploaded" | "skipped">>) => {
     setGitHubProgress((current) => current ? { ...current, ...metrics, logs: [...current.logs, message].slice(-8) } : current);
@@ -459,6 +457,8 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           return true;
         }
         if (!isValidBackupManifest(remoteManifest)) throw new Error("This GitHub backup manifest is unsafe or uses a format this app does not support. No data was changed. Open GitHub settings to choose a different backup folder, or restore a legacy backup.");
+        const firstPullOnThisDevice = await getGitHubLastSyncAt() === 0;
+        if (firstPullOnThisDevice) reportGitHubProgress("First pull on this device · GitHub will replace the seeded local backup data. A recovery copy will be kept.");
         const pullPaths = Object.keys(remoteManifest.files);
         const pullTotal = pullPaths.length + (remoteManifest.deleted || []).filter((path) => !remoteManifest.files[path]).length;
         reportGitHubProgress(`Manifest loaded · ${pullPaths.length} files tracked. Preparing comparison…`, { total: pullTotal, processed: 0 });
@@ -485,8 +485,13 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           const localHash = local ? await hashBlob(local) : undefined;
           if (localHash === remoteHash) { const same = local!; checkpoints.push({ path, blob: same, acknowledge: true }); await clearGitHubConflict(path); pullProcessed += 1; pullSkipped += 1; reportGitHubProgress(`Already current · ${path}`, { processed: pullProcessed, skipped: pullSkipped }); continue; }
           const remote = await requestGitHubFile("GET", username, config, [rootPath, path].filter(Boolean).join("/"), undefined, true) as Blob;
-          const merged = await mergeGitHubFile(path, base, local, remote, "remote");
-          if (merged.conflict) {
+          const merged = firstPullOnThisDevice
+            ? { blob: remote, conflict: false }
+            : await mergeGitHubFile(path, base, local, remote, "remote");
+          if (firstPullOnThisDevice && local && localHash !== remoteHash) {
+            await saveGitHubRecoveryCopy(path, base, local, remote, "First pull replaced the new device's seeded or local backup data with the GitHub version.");
+            reportGitHubProgress(`Saved first-pull recovery copy · ${path}`);
+          } else if (merged.conflict) {
             autoResolvedCount += 1;
             await saveGitHubRecoveryCopy(path, base, local, remote, merged.reason || "Pull chose GitHub's version for this conflicting file.");
             reportGitHubProgress(`Auto-resolved conflict · kept GitHub version · ${path}`);
@@ -499,13 +504,25 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           reportGitHubProgress(`Checked ${path}`, { processed: pullProcessed, skipped: pullSkipped });
         }
         const deletionsToApply: string[] = [];
-        for (const path of remoteManifest.deleted || []) {
+        const remoteDeletedPaths = (remoteManifest.deleted || []).filter((path) => !remoteManifest.files[path]);
+        const firstPullLocalOnlyPaths = firstPullOnThisDevice
+          ? localFiles.map((file) => file.path).filter((path) => !remoteManifest.files[path] && !remoteDeletedPaths.includes(path))
+          : [];
+        for (const path of [...new Set([...remoteDeletedPaths, ...firstPullLocalOnlyPaths])]) {
           if (remoteManifest.files[path]) continue;
           reportGitHubProgress(`Checking remote deletion · ${path}`);
           const local = localByPath.get(path)?.blob;
           const base = await getGitHubCheckpoint(path);
           await stageGitHubOutbox(path, local);
-          if (!local || !base || await hashBlob(local) === await hashBlob(base)) {
+          if (firstPullOnThisDevice) {
+            if (local) {
+              await saveGitHubRecoveryCopy(path, base, local, undefined, "First pull removed data that is not present in the GitHub backup. A local recovery copy was saved.");
+              reportGitHubProgress(`Saved first-pull recovery copy · ${path}`);
+            }
+            deletionsToApply.push(path);
+            await saveGitHubCheckpoint(path);
+            await clearGitHubConflict(path);
+          } else if (!local || !base || await hashBlob(local) === await hashBlob(base)) {
             deletionsToApply.push(path);
             await saveGitHubCheckpoint(path);
             await clearGitHubConflict(path);
@@ -644,18 +661,30 @@ export default function AppSidebar({ active }: { active: AppSection }) {
             if (metadata?.sha) payload.sha = metadata.sha;
             try {
               await assertRemoteLock();
-              await requestGitHubFile("PUT", username, config, [rootPath, file.path].filter(Boolean).join("/"), payload);
-              const verified = await requestGitHubFile("GET", username, config, [rootPath, file.path].filter(Boolean).join("/"), undefined, true) as Blob;
-              if (await hashBlob(verified) !== desiredHash) {
+              const saved = await requestGitHubFile("PUT", username, config, [rootPath, file.path].filter(Boolean).join("/"), payload) as { content?: { sha?: unknown } };
+              let verifiedMatches = false;
+              let verifiedBlob = desired.blob;
+              if (action === "hard-push" && typeof saved?.content?.sha === "string") {
+                // The Contents API response identifies the exact Git blob it committed.
+                // Confirm the current path still points to that blob; an immediate raw
+                // download can briefly return a stale CDN copy and falsely look like a race.
+                const latest = await requestGitHubFile("GET", username, config, [rootPath, file.path].filter(Boolean).join("/")) as { sha?: unknown };
+                verifiedMatches = latest?.sha === saved.content.sha;
+              } else {
+                const verified = await requestGitHubFile("GET", username, config, [rootPath, file.path].filter(Boolean).join("/"), undefined, true) as Blob;
+                verifiedBlob = verified;
+                verifiedMatches = await hashBlob(verified) === desiredHash;
+              }
+              if (!verifiedMatches) {
                 if (attempt === 4) throw new Error(action === "hard-push"
-                  ? `GitHub kept changing ${file.path} during the hard push. The local copy is still queued; run Hard push again when no other sync is writing to this backup.`
+                  ? `GitHub could not confirm the uploaded version of ${file.path}. The local copy is still queued; retry Hard push.`
                   : `GitHub changed ${file.path} during sync. The local change remains queued for the next attempt.`);
                 await new Promise((resolve) => setTimeout(resolve, 150 * (2 ** attempt) + Math.random() * 100));
                 continue;
               }
               if (desiredHash !== file.hash) mergedDownloads.push({ path: file.path, blob: desired.blob });
               nextHashes[file.path] = desiredHash;
-              await saveGitHubCheckpoint(file.path, verified, true);
+              await saveGitHubCheckpoint(file.path, verifiedBlob, true);
               pushed += 1;
               fileProcessed += 1; fileUploaded += 1;
               reportGitHubProgress(`Pushed ${file.path}`, { processed: fileProcessed, uploaded: fileUploaded, skipped: fileSkipped });
@@ -760,11 +789,10 @@ export default function AppSidebar({ active }: { active: AppSection }) {
         setGitHubProgress((current) => current ? { ...current, status: "success", title: action === "hard-push" ? "GitHub Hard Push Complete" : "GitHub Push Complete", processed: current.total, uploaded: fileUploaded, skipped: fileSkipped, logs: [...current.logs, pushSummary].slice(-8) } : current);
         if (!options.silent) await dialogs.alert({ title: action === "hard-push" ? "Hard push complete" : "GitHub sync complete", message: `Uploaded ${pushed} changed files${deleted.length ? ` and removed ${deleted.length} deleted files` : ""}. Automatically resolved ${autoResolvedCount} conflict(s); recovery copies were saved on this device. Unchanged files were skipped.` });
       }
-      if (action !== "pull") {
-        const syncedAt = Date.now();
-        await saveGitHubLastSyncAt(syncedAt);
-        setGitHubLastSyncAt(syncedAt);
-      }
+      const syncedAt = Date.now();
+      await saveGitHubLastSyncAt(syncedAt);
+      setGitHubLastSyncAt(syncedAt);
+      try { localStorage.removeItem(githubAutoSyncPauseKey); } catch { /* Keep sync usable if storage is unavailable. */ }
       setGitHubError("");
       setGitHubNeedsSettings(false);
       setGitHubConflicts(await listGitHubConflicts());
@@ -794,27 +822,43 @@ export default function AppSidebar({ active }: { active: AppSection }) {
 
   useEffect(() => {
     if (!githubSyncReady || !githubLinked) return;
+    try { if (localStorage.getItem(githubAutoSyncPauseKey)) return; } catch { /* Continue with this session's auto-sync schedule. */ }
     let active = true;
+    let checking = false;
     let timer: number | undefined;
     const schedule = (delay: number) => {
       if (timer !== undefined) window.clearTimeout(timer);
       timer = window.setTimeout(() => void checkAndSync(), delay);
     };
     const checkAndSync = async () => {
-      if (!active) return;
-      const lastSync = await getGitHubLastSyncAt();
-      if (!active) return;
-      setGitHubLastSyncAt(lastSync);
-      const delayUntilDue = lastSync ? lastSync + 24 * 60 * 60 * 1000 - Date.now() : 0;
-      if (delayUntilDue > 0) { schedule(delayUntilDue); return; }
-      if (document.visibilityState !== "visible" || !navigator.onLine || githubAutoSyncInFlightRef.current || githubActionInFlightRef.current) {
-        schedule(60 * 1000);
-        return;
+      if (!active || checking) return;
+      try { if (localStorage.getItem(githubAutoSyncPauseKey)) return; } catch { /* Continue with this session's auto-sync schedule. */ }
+      checking = true;
+      if (timer !== undefined) { window.clearTimeout(timer); timer = undefined; }
+      try {
+        const lastSync = await getGitHubLastSyncAt();
+        if (!active) return;
+        setGitHubLastSyncAt(lastSync);
+        const delayUntilDue = lastSync ? lastSync + 24 * 60 * 60 * 1000 - Date.now() : 0;
+        if (delayUntilDue > 0) { schedule(delayUntilDue); return; }
+        if (document.visibilityState !== "visible" || !navigator.onLine || githubAutoSyncInFlightRef.current || githubActionInFlightRef.current) {
+          schedule(60 * 1000);
+          return;
+        }
+        githubAutoSyncInFlightRef.current = true;
+        const succeeded = await runGitHubAction("push", { silent: true });
+        githubAutoSyncInFlightRef.current = false;
+        if (!active) return;
+        if (succeeded) schedule(24 * 60 * 60 * 1000);
+        else {
+          // A persistent remote race should not trigger a push every few minutes
+          // in every open window. Leave recovery to an explicit user retry.
+          try { localStorage.setItem(githubAutoSyncPauseKey, new Date().toISOString()); } catch { /* The in-memory guard below still applies until reload. */ }
+        }
+      } finally {
+        githubAutoSyncInFlightRef.current = false;
+        checking = false;
       }
-      githubAutoSyncInFlightRef.current = true;
-      const succeeded = await runGitHubAction("push", { silent: true });
-      githubAutoSyncInFlightRef.current = false;
-      if (active) schedule(succeeded ? 24 * 60 * 60 * 1000 : 5 * 60 * 1000);
     };
     const onReturn = () => { if (document.visibilityState === "visible") void checkAndSync(); };
     void checkAndSync();
@@ -826,7 +870,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
       document.removeEventListener("visibilitychange", onReturn);
       window.removeEventListener("online", onReturn);
     };
-  }, [githubSyncReady, githubLinked, githubSyncScopeKey]);
+  }, [githubSyncReady, githubLinked, githubSyncScopeKey, githubLastSyncAt]);
 
   const exportBackup = async () => {
     setSettingsOpen(false);

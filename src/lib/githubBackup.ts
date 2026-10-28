@@ -37,6 +37,26 @@ const fromPathId = (value: string) => {
   const binary = atob(base64 + "=".repeat((4 - base64.length % 4) % 4));
   return new TextDecoder().decode(Uint8Array.from(binary, (character) => character.charCodeAt(0)));
 };
+function storageKeyFromBackupPath(path: string) {
+  const parts = path.split("/");
+  if (parts[0] === "app-data" && parts[1]?.endsWith(".json")) return fromPathId(parts[1].slice(0, -5));
+  if (parts[0] === "mind-maps" && parts[1] === "state" && parts[2]?.endsWith(".json")) return fromPathId(parts[2].slice(0, -5));
+  throw new Error(`GitHub sync stopped: ${path} has an invalid storage path.`);
+}
+async function readStorageBackupEntry(path: string, blob: Blob) {
+  const key = storageKeyFromBackupPath(path);
+  const raw = await blob.text();
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && Object.prototype.hasOwnProperty.call(parsed, "value")) {
+      const value = typeof parsed.value === "string" ? parsed.value : JSON.stringify(parsed.value);
+      if (typeof value === "string") return { key, value };
+    }
+  } catch { /* Older backups stored the raw localStorage value instead of an envelope. */ }
+  // The path identifies the storage key. Keep legacy raw data intact, including
+  // JSON values that older app versions wrote without the { key, value } wrapper.
+  return { key, value: raw };
+}
 const safeExt = (mime: string) => mime === "application/pdf" ? "pdf" : mime.split("/")[1]?.split(";")[0]?.replace(/[^a-z0-9]/gi, "") || "bin";
 
 function openStore(databaseName: string, storeName: string, keyPath: string): Promise<IDBDatabase> {
@@ -319,7 +339,7 @@ export async function collectAlleviateGitHubFiles(): Promise<GitHubBackupFile[]>
   mindMapStateKeys.forEach((key) => putJson(`mind-maps/state/${pathId(key)}.json`, { key, value: values.get(key) ?? "" }));
 
   for (const [key, value] of localEntries) {
-    if (ignoredKeys.has(key) || isSensitiveStorageKey(key) || key === MAPS_KEY || key.startsWith("alleviate-wisemapping-") || key.startsWith("alleviate-resources-default-") || /^.+-xml$/.test(key) && maps.some((map: any) => `${map.id}-xml` === key)) continue;
+    if (ignoredKeys.has(key) || key.startsWith("alleviate-github-auto-sync-paused-v1:") || isSensitiveStorageKey(key) || key === MAPS_KEY || key.startsWith("alleviate-wisemapping-") || key.startsWith("alleviate-resources-default-") || /^.+-xml$/.test(key) && maps.some((map: any) => `${map.id}-xml` === key)) continue;
     putJson(`app-data/${pathId(key)}.json`, { key, value });
   }
 
@@ -372,18 +392,24 @@ export async function applyAlleviateGitHubChanges(downloads: Array<{ path: strin
   const removedCanvasImageKeys = new Set<string>();
 
   for (const item of downloads) {
+    if (isSensitiveGitHubBackupPath(item.path)) continue;
     if (item.path.endsWith(".json")) {
       let parsed: any;
+      const isStorageEntry = item.path.startsWith("app-data/") || item.path.startsWith("mind-maps/state/");
       try { parsed = JSON.parse(await item.blob.text()); }
-      catch { throw new Error(`GitHub sync stopped: ${item.path} is not valid JSON. Local data was left unchanged.`); }
+      catch {
+        if (isStorageEntry) { storageKeyFromBackupPath(item.path); continue; }
+        throw new Error(`GitHub sync stopped: ${item.path} is not valid JSON. Local data was left unchanged.`);
+      }
+      if (isStorageEntry) { storageKeyFromBackupPath(item.path); continue; }
       if (!parsed || typeof parsed !== "object") throw new Error(`GitHub sync stopped: ${item.path} has an invalid data shape. Local data was left unchanged.`);
       if (item.path.startsWith("canvases/") && item.path.endsWith("/canvas.json") && (typeof parsed.id !== "string" || !Array.isArray(parsed.elements))) throw new Error(`GitHub sync stopped: ${item.path} is not a valid canvas document.`);
       if (item.path.startsWith("mind-maps/maps/") && item.path.endsWith(".json") && (typeof parsed.map?.id !== "string" || typeof parsed.xml !== "string")) throw new Error(`GitHub sync stopped: ${item.path} is not a valid mind map file.`);
-      if ((item.path.startsWith("app-data/") || item.path.startsWith("mind-maps/state/")) && (typeof parsed.key !== "string" || typeof parsed.value !== "string")) throw new Error(`GitHub sync stopped: ${item.path} has invalid storage data.`);
     }
   }
 
   for (const item of downloads) {
+    if (isSensitiveGitHubBackupPath(item.path)) continue;
     if (item.path.startsWith("canvases/") && item.path.endsWith("/canvas.json")) {
       const parts = item.path.split("/"); const canvasId = fromPathId(parts[1]); canvasWrites.set(canvasId, JSON.parse(await readBlobText(item.blob)));
     } else if (item.path === "canvases/workspace.json") {
@@ -396,11 +422,11 @@ export async function applyAlleviateGitHubChanges(downloads: Array<{ path: strin
       const value = JSON.parse(await readBlobText(item.blob));
       if (value?.map?.id) mindMapWrites.set(String(value.map.id), value);
     } else if (item.path.startsWith("mind-maps/state/") && item.path.endsWith(".json")) {
-      const value = JSON.parse(await readBlobText(item.blob));
-      if (typeof value?.key === "string" && typeof value?.value === "string" && !isSensitiveStorageKey(value.key)) localStorageWrites.set(value.key, value.value);
+      const value = await readStorageBackupEntry(item.path, item.blob);
+      if (!isSensitiveStorageKey(value.key)) localStorageWrites.set(value.key, value.value);
     } else if (item.path.startsWith("app-data/") && item.path.endsWith(".json")) {
-      const value = JSON.parse(await readBlobText(item.blob));
-      if (typeof value?.key === "string" && typeof value?.value === "string" && !isSensitiveStorageKey(value.key)) localStorageWrites.set(value.key, value.value);
+      const value = await readStorageBackupEntry(item.path, item.blob);
+      if (!isSensitiveStorageKey(value.key)) localStorageWrites.set(value.key, value.value);
     } else if (item.path === "books/pdfs/index.json") {
       pdfIndex = JSON.parse(await readBlobText(item.blob)).pdfs || [];
     } else if (item.path.startsWith("books/pdfs/") && item.path.endsWith(".pdf")) {

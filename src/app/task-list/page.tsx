@@ -5,6 +5,7 @@ import { CalendarDays, CalendarPlus, Check, CalendarRange, ChevronDown, ChevronR
 import AppSidebar from "../AppSidebar";
 import { useAppDialogs } from "../AppDialogs";
 import FeedbackLoopCard, { EMPTY_LOOP, type Loop } from "../feedback-loop/FeedbackLoopCard";
+import { syncAllFeedbackActionTitles, syncFeedbackActionTitle } from "../lib/feedbackActionSync";
 import { taskScheduleNote, taskScheduleSummary } from "../../lib/taskScheduleSummary";
 
 const EVENTS_KEY = "alleviate-calendar-events-v1";
@@ -115,6 +116,15 @@ export default function TaskListPage() {
   const [scheduleSkipWeekdays, setScheduleSkipWeekdays] = useState<number[]>([]);
   const [scheduleExceptOpen, setScheduleExceptOpen] = useState(false);
   useEffect(() => {
+    const requestedObject = new URLSearchParams(window.location.search).get("object")?.trim();
+    if (!requestedObject) return;
+    setSelectedObject(requestedObject);
+    setSelectedAction(null);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("object");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  }, []);
+  useEffect(() => {
     const refresh = () => setTasks(readTasks());
     const refreshQuadrants = () => {
       try {
@@ -158,6 +168,7 @@ export default function TaskListPage() {
         setObjectHierarchy(readObjectHierarchy(nextObjects));
       } catch { setObjects([]); }
     };
+    syncAllFeedbackActionTitles();
     refresh();
     refreshQuadrants();
     refreshLists();
@@ -242,6 +253,17 @@ export default function TaskListPage() {
     const dates = new Set(task.completedDates || []); if (dates.has(today)) dates.delete(today); else dates.add(today);
     const next = tasks.map((item) => item.id === task.id ? { ...item, completedDates: Array.from(dates) } : item); setTasks(next); saveTasks(next);
   };
+  const setLinkedTasksCompleteToday = (linkedTasks: Task[], complete: boolean) => {
+    const linkedIds = new Set(linkedTasks.map((task) => task.id));
+    const next = tasks.map((task) => {
+      if (!linkedIds.has(task.id)) return task;
+      const dates = new Set(task.completedDates || []);
+      if (complete) dates.add(today); else dates.delete(today);
+      return { ...task, completedDates: Array.from(dates) };
+    });
+    setTasks(next);
+    saveTasks(next);
+  };
   const remove = (task: Task) => {
     const next = tasks.filter((item) => item.id !== task.id); setTasks(next); saveTasks(next);
   };
@@ -257,9 +279,9 @@ export default function TaskListPage() {
     if (addingFactorActionId === action.id) setAddingFactorActionId(null);
     if (inlineActionEdit?.object.trim().toLocaleLowerCase() === key && inlineActionEdit.actionId === action.id) setInlineActionEdit(null);
   };
-  const toggleAction = (object: string, action: LinkedAction) => {
+  const toggleAction = (object: string, action: LinkedAction, nextComplete = !action.complete) => {
     const key = object.trim().toLocaleLowerCase();
-    const complete = !action.complete;
+    const complete = nextComplete;
     const next = { ...loops, [key]: { ...loops[key], actions: (loops[key]?.actions || []).map((item) => item.id === action.id ? { ...item, complete, completedDate: complete ? today : undefined } : item) } };
     setLoops(next);
     try { localStorage.setItem(LOOPS_KEY, JSON.stringify(next)); window.dispatchEvent(new Event("feedback-loops-updated")); } catch { /* Keep the action list usable if storage is unavailable. */ }
@@ -307,10 +329,11 @@ export default function TaskListPage() {
     if (!scheduleTarget) return;
     const repeat = scheduleRepeat === "none" ? undefined : { interval: scheduleRepeat === "daily" ? 1 : Math.max(1, Math.min(365, scheduleInterval)), unit: "day" as const, ...(scheduleSkipWeekdays.length ? { skipWeekdays: scheduleSkipWeekdays } : {}), ...(scheduleUntil >= scheduleDate ? { until: scheduleUntil } : {}) };
     const existing = scheduleTarget.existingId ? tasks.find((task) => task.id === scheduleTarget.existingId) : undefined;
-    const scheduled: Task = { id: existing?.id || crypto.randomUUID(), title: scheduleTarget.title, date: scheduleDate, time: scheduleAllDay ? undefined : scheduleStart, endTime: scheduleAllDay ? undefined : scheduleEnd, note: scheduleTarget.note, color: existing?.color, repeat, feedbackAction: scheduleTarget.feedbackAction, completedDates: existing?.completedDates || [] };
+    const scheduled: Task = { id: existing?.id || crypto.randomUUID(), title: scheduleTarget.title, date: scheduleDate, time: scheduleAllDay ? undefined : scheduleStart, endTime: scheduleAllDay ? undefined : scheduleEnd, note: scheduleTarget.note, color: existing?.color, repeat, feedbackAction: scheduleTarget.feedbackAction || existing?.feedbackAction, completedDates: existing?.completedDates || [] };
     const next = existing ? tasks.map((task) => task.id === existing.id ? scheduled : task) : [...tasks, scheduled];
     setTasks(next);
     saveTasks(next);
+    if (scheduled.feedbackAction) syncFeedbackActionTitle(scheduled.feedbackAction.object, scheduled.feedbackAction.actionId, scheduled.title);
     setScheduleExceptOpen(false);
     setScheduleTarget(null);
   };
@@ -319,6 +342,12 @@ export default function TaskListPage() {
     const next = { ...loops, [key]: { ...EMPTY_LOOP, ...loops[key], ...patch } };
     setLoops(next);
     try { localStorage.setItem(LOOPS_KEY, JSON.stringify(next)); window.dispatchEvent(new Event("feedback-loops-updated")); } catch { /* Keep the feedback loop usable if storage is unavailable. */ }
+    if (patch.actions) {
+      patch.actions.forEach((action) => {
+        const previous = (loops[key]?.actions || []).find((item) => item.id === action.id);
+        if (action.name?.trim() && action.name !== previous?.name) syncFeedbackActionTitle(object, action.id, action.name);
+      });
+    }
     syncObjectMembership(object, next[key].actions.some((action) => Boolean(action.name?.trim() || action.details?.trim())));
   };
   const startInlineActionEdit = (object: string, action: LinkedAction) => {
@@ -437,7 +466,12 @@ export default function TaskListPage() {
     window.dispatchEvent(new Event("resources-mindmap-updated"));
   };
   const objectActions = selectedObject ? (loops[selectedObject.trim().toLocaleLowerCase()]?.actions || []).filter((action) => Boolean(action.name?.trim() || action.details?.trim())) : [];
-  const selectedActionSchedule = selectedAction ? [...tasks].reverse().find((task) => task.feedbackAction?.object.trim().toLocaleLowerCase() === selectedAction.object.trim().toLocaleLowerCase() && task.feedbackAction.actionId === selectedAction.action.id) : undefined;
+  const selectedActionSchedules = selectedAction ? tasks.filter((task) => task.feedbackAction?.object.trim().toLocaleLowerCase() === selectedAction.object.trim().toLocaleLowerCase() && task.feedbackAction.actionId === selectedAction.action.id) : [];
+  const selectedActionSchedule = selectedActionSchedules[selectedActionSchedules.length - 1];
+  const selectedActionTodaySchedules = selectedActionSchedules.filter((task) => occursOn(task, today));
+  const selectedActionComplete = selectedActionTodaySchedules.length
+    ? selectedActionTodaySchedules.every((task) => task.completedDates?.includes(today))
+    : Boolean(selectedAction?.action.complete);
   const taskActionNames = new Set(Object.values(loops).flatMap((loop) => loop.actions.map((action) => action.name?.trim().toLocaleLowerCase()).filter((value): value is string => Boolean(value))));
   const renderObjectTopics = (topics: ObjectTopic[], depth = 0): ReactNode => topics.filter((topic) => !taskActionNames.has(topic.text.trim().toLocaleLowerCase())).map((topic) => {
     const key = topic.text.trim().toLocaleLowerCase();
@@ -498,19 +532,24 @@ export default function TaskListPage() {
               <div className="today-task-list">
                 {objectActions.length ? objectActions.map((action) => {
                   const factor = loops[selectedObject.trim().toLocaleLowerCase()]?.inputs.find((input) => input.id === action.inputId);
-                  const linkedSchedule = [...tasks].reverse().find((task) => task.feedbackAction?.object.trim().toLocaleLowerCase() === selectedObject.trim().toLocaleLowerCase() && task.feedbackAction.actionId === action.id);
+                  const linkedSchedules = tasks.filter((task) => task.feedbackAction?.object.trim().toLocaleLowerCase() === selectedObject.trim().toLocaleLowerCase() && task.feedbackAction.actionId === action.id);
+                  const linkedSchedule = linkedSchedules[linkedSchedules.length - 1];
+                  const todaySchedules = linkedSchedules.filter((task) => occursOn(task, today));
+                  const actionComplete = todaySchedules.length
+                    ? todaySchedules.every((task) => task.completedDates?.includes(today))
+                    : Boolean(action.complete);
                   const actionMetadata = linkedSchedule ? taskMetadata(linkedSchedule) : [];
                   const actionNote = linkedSchedule ? taskScheduleNote(linkedSchedule) : action.details || "";
                   return <div className={`task-action-item ${factorPickerActionId === action.id ? "has-factor-picker" : ""}`} key={action.id}>
-                    <article onClick={() => setSelectedAction({ object: selectedObject, action })} className={`today-task-row ${action.complete ? "is-complete" : ""} ${selectedAction?.action.id === action.id ? "is-selected" : ""}`}>
-                      <button type="button" className="today-task-check" style={taskCheckboxStyle(linkedSchedule?.id)} onClick={(event) => { event.stopPropagation(); toggleAction(selectedObject, action); setSelectedAction({ object: selectedObject, action: { ...action, complete: !action.complete, completedDate: !action.complete ? today : undefined } }); }} aria-label={action.complete ? `Mark ${action.name || action.details} incomplete` : `Mark ${action.name || action.details} complete`}>{action.complete && <Check size={14} />}</button>
+                    <article onClick={() => setSelectedAction({ object: selectedObject, action: { ...action, complete: actionComplete } })} className={`today-task-row ${actionComplete ? "is-complete" : ""} ${selectedAction?.action.id === action.id ? "is-selected" : ""}`}>
+                      <button type="button" className="today-task-check" style={taskCheckboxStyle(linkedSchedule?.id)} onClick={(event) => { event.stopPropagation(); const nextComplete = !actionComplete; if (todaySchedules.length) { setLinkedTasksCompleteToday(todaySchedules, nextComplete); toggleAction(selectedObject, action, nextComplete); } else toggleAction(selectedObject, action, nextComplete); setSelectedAction({ object: selectedObject, action: { ...action, complete: nextComplete, completedDate: nextComplete ? today : undefined } }); }} aria-label={actionComplete ? `Mark ${action.name || action.details} incomplete` : `Mark ${action.name || action.details} complete`}>{actionComplete && <Check size={14} />}</button>
                       <div className="today-task-copy">{inlineActionEdit?.object.toLocaleLowerCase() === selectedObject.toLocaleLowerCase() && inlineActionEdit.actionId === action.id ? <input ref={inlineActionInputRef} className="task-inline-action-name" aria-label="Task name" value={inlineActionName} onChange={(event) => setInlineActionName(event.target.value)} onBlur={commitInlineActionEdit} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitInlineActionEdit(); } if (event.key === "Escape") setInlineActionEdit(null); }} /> : <strong title="Double-click to edit task name" onDoubleClick={(event) => { event.stopPropagation(); startInlineActionEdit(selectedObject, action); }}>{action.name || action.details}</strong>}<small className="task-action-meta">{actionMetadata.map((detail, index) => <span key={`${detail}-${index}`}>{detail}</span>)}</small>{factor && <small className="task-action-note">{factor.name}: {factor.value || "value not set"}</small>}{actionNote && <small className="task-action-note">{actionNote}</small>}</div>
                       <div className="task-row-tools">
                         <button type="button" className="task-row-icon" title="Schedule action" aria-label={`Schedule ${action.name || "action"}`} onClick={(event) => { event.stopPropagation(); openSchedule({ title: action.name || action.details || "Feedback action", note: [selectedObject && `Feedback loop · ${selectedObject}`, action.details].filter(Boolean).join(" — "), feedbackAction: { object: selectedObject, actionId: action.id }, existing: linkedSchedule }); }}><CalendarPlus size={15} /></button>
                         <button type="button" className="task-row-icon" title="Choose the factor this action influences" aria-label={`Choose factor for ${action.name || "action"}`} aria-expanded={factorPickerActionId === action.id} onClick={(event) => { event.stopPropagation(); setFactorPickerActionId((current) => current === action.id ? null : action.id); }}><Wrench size={14} /></button>
                         <button type="button" className="task-row-icon task-row-delete-icon" title="Delete action" aria-label={`Delete ${action.name || "action"}`} onClick={(event) => { event.stopPropagation(); removeObjectAction(selectedObject, action); }}><Trash2 size={14} /></button>
                       </div>
-                      {action.complete && <span className="today-task-time">{action.completedDate || "Completed"}</span>}
+                      {actionComplete && <span className="today-task-time">{action.completedDate || "Completed"}</span>}
                     </article>
                     {factorPickerActionId === action.id && <div className="task-factor-picker" onClick={(event) => event.stopPropagation()}><label>Influences<div className="task-factor-select-wrap"><button type="button" className="task-factor-select" aria-haspopup="listbox" aria-expanded={factorMenuActionId === action.id} onClick={() => setFactorMenuActionId((current) => current === action.id ? null : action.id)}><span>{(loops[selectedObject.trim().toLocaleLowerCase()]?.inputs || []).find((input) => input.id === action.inputId)?.name || "No influence selected"}</span><ChevronDown size={14} /></button>{factorMenuActionId === action.id && <div className="task-factor-menu" role="listbox" aria-label="Choose influence"><button type="button" role="option" aria-selected={!action.inputId} onClick={() => { updateActionFactor(selectedObject, action.id, ""); setFactorMenuActionId(null); }}>No influence selected</button>{(loops[selectedObject.trim().toLocaleLowerCase()]?.inputs || []).map((input) => <button type="button" role="option" aria-selected={action.inputId === input.id} key={input.id} onClick={() => { updateActionFactor(selectedObject, action.id, input.id); setFactorMenuActionId(null); }}>{input.name || "Untitled influence"}</button>)}<div className="task-factor-menu-divider" />{addingFactorActionId === action.id ? <div className="task-factor-add-form"><input autoFocus value={newFactorName} onChange={(event) => setNewFactorName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addFactorAndAssign(selectedObject, action.id); } if (event.key === "Escape") { setAddingFactorActionId(null); setNewFactorName(""); setNewFactorValue(""); setNewFactorTools(""); } }} placeholder="Factor you can change" aria-label="Factor you can change" /><input value={newFactorValue} onChange={(event) => setNewFactorValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addFactorAndAssign(selectedObject, action.id); } }} placeholder="Current value" aria-label="Current value" /><input value={newFactorTools} onChange={(event) => setNewFactorTools(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addFactorAndAssign(selectedObject, action.id); } }} placeholder="What could help?" aria-label="What could help?" /><button type="button" disabled={!newFactorName.trim()} onClick={() => addFactorAndAssign(selectedObject, action.id)}>Add & assign</button></div> : <button type="button" className="task-factor-add-trigger" onClick={() => { setNewFactorName(""); setNewFactorValue(""); setNewFactorTools(""); setAddingFactorActionId(action.id); }}>＋ Add new influence</button>}</div>}</div></label><button type="button" onClick={() => { setFactorPickerActionId(null); setFactorMenuActionId(null); setAddingFactorActionId(null); }}>Done</button></div>}
                   </div>;
@@ -535,7 +574,7 @@ export default function TaskListPage() {
             <FeedbackLoopCard key={selectedObject.toLocaleLowerCase()} compact name={selectedObject} loop={loops[selectedObject.trim().toLocaleLowerCase()] || EMPTY_LOOP} schedules={tasks.filter((task): task is Task & { feedbackAction: { object: string; actionId: string } } => Boolean(task.feedbackAction?.object && task.feedbackAction.actionId))} onUpdate={(patch) => updateObjectLoop(selectedObject, patch)} />
           ) : selectedAction ? (
             <>
-              <header><button className="detail-check" style={taskCheckboxStyle(selectedActionSchedule?.id)} onClick={() => { toggleAction(selectedAction.object, selectedAction.action); setSelectedAction((current) => current ? { ...current, action: { ...current.action, complete: !current.action.complete, completedDate: !current.action.complete ? today : undefined } } : null); }}>{selectedAction.action.complete && <Check size={13} />}</button><span className="detail-date">{selectedAction.object}</span></header>
+              <header><button className="detail-check" style={taskCheckboxStyle(selectedActionSchedule?.id)} onClick={() => { const nextComplete = !selectedActionComplete; if (selectedActionTodaySchedules.length) { setLinkedTasksCompleteToday(selectedActionTodaySchedules, nextComplete); toggleAction(selectedAction.object, selectedAction.action, nextComplete); } else toggleAction(selectedAction.object, selectedAction.action, nextComplete); setSelectedAction((current) => current ? { ...current, action: { ...current.action, complete: nextComplete, completedDate: nextComplete ? today : undefined } } : null); }}>{selectedActionComplete && <Check size={13} />}</button><span className="detail-date">{selectedAction.object}</span></header>
               <h2>{selectedAction.action.name || selectedAction.action.details}</h2>
               {selectedAction.action.details && selectedAction.action.name && <p>{selectedAction.action.details}</p>}
             </>

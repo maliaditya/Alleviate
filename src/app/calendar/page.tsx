@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { CalendarDays, CalendarPlus, ChevronDown, ChevronLeft, ChevronRight, Plus, Trash2, X } from "lucide-react";
 import AppSidebar from "../AppSidebar";
+import { syncAllFeedbackActionTitles, syncFeedbackActionTitle } from "../lib/feedbackActionSync";
 
 const EVENTS_KEY = "alleviate-calendar-events-v1";
 const LOOPS_KEY = "alleviate-feedback-loops-v1";
@@ -98,11 +99,13 @@ export default function CalendarPage() {
   }, []);
 
   useEffect(() => {
-    const refresh = () => { setEvents(readEvents()); setReadings(readReadings()); };
+    const refresh = () => { const nextEvents = readEvents(); eventsRef.current = nextEvents; setEvents(nextEvents); setReadings(readReadings()); };
+    syncAllFeedbackActionTitles();
     refresh();
     window.addEventListener("storage", refresh);
     window.addEventListener("feedback-loops-updated", refresh);
-    return () => { window.removeEventListener("storage", refresh); window.removeEventListener("feedback-loops-updated", refresh); };
+    window.addEventListener("calendar-events-updated", refresh);
+    return () => { window.removeEventListener("storage", refresh); window.removeEventListener("feedback-loops-updated", refresh); window.removeEventListener("calendar-events-updated", refresh); };
   }, []);
 
   useEffect(() => {
@@ -202,6 +205,7 @@ export default function CalendarPage() {
     const next = editingEventId ? events.map((item) => item.id === editingEventId ? updated : item) : [...events, updated];
     setEvents(next);
     try { localStorage.setItem(EVENTS_KEY, JSON.stringify(next)); } catch { /* Keep this event visible for the current session. */ }
+    if (updated.feedbackAction) syncFeedbackActionTitle(updated.feedbackAction.object, updated.feedbackAction.actionId, updated.title);
     resetEventForm();
   }
   function resetEventForm() {
