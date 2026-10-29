@@ -1,5 +1,6 @@
 /** Modular, content-hashed GitHub backup files for Alleviate. */
 import { loadCanvasDocuments, saveCanvasDocuments } from "./canvasDocumentStore";
+import { createAppBackup, parseAppBackup, restoreAppBackup } from "./appBackup";
 export type GitHubBackupFile = { path: string; blob: Blob; hash: string };
 export type GitHubBackupManifest = { format: "alleviate-github-backup"; version: 1; updatedAt: string; files: Record<string, string>; deleted?: string[] };
 
@@ -26,6 +27,18 @@ export function isSensitiveGitHubBackupPath(path: string) {
   return false;
 }
 const textBlob = (value: string) => new Blob([value], { type: "application/json;charset=utf-8" });
+export async function isValidMindMapBackupRecord(blob: Blob | undefined): Promise<boolean> {
+  if (!blob) return false;
+  try {
+    const value = JSON.parse(await blob.text());
+    if (!value || typeof value !== "object" || typeof value.map?.id !== "string" || !value.map.id.trim() || typeof value.map.title !== "string" || !value.map.title.trim() || typeof value.xml !== "string" || !value.xml.trim()) return false;
+    if (typeof DOMParser !== "undefined") {
+      const xml = new DOMParser().parseFromString(value.xml, "application/xml");
+      if (xml.querySelector("parsererror") || xml.documentElement?.localName !== "map") return false;
+    }
+    return true;
+  } catch { return false; }
+}
 const pathId = (value: string) => {
   const bytes = new TextEncoder().encode(value);
   let binary = "";
@@ -177,12 +190,50 @@ export async function saveGitHubCheckpoint(path: string, blob?: Blob, acknowledg
   }
 }
 
+export async function saveGitHubCheckpointBatch(entries: Array<{ path: string; blob?: Blob; acknowledge?: boolean }>) {
+  // Persist the verified baseline only after the whole sync and manifest commit.
+  // A failed mid-upload attempt must leave prior checkpoints intact so retries
+  // still recognize every unsynced local edit.
+  const timestamp = new Date().toISOString();
+  const prepared = await Promise.all(entries.map(async (entry) => ({
+    checkpointKey: syncRecordKey("checkpoint", entry.path),
+    checkpoint: entry.blob ? { key: syncRecordKey("checkpoint", entry.path), blob: entry.blob, hash: await hashBlob(entry.blob), updatedAt: timestamp } satisfies SyncRecord : undefined,
+    acknowledge: entry.acknowledge ?? true,
+    outboxKey: syncRecordKey("outbox", entry.path),
+    conflictKey: syncRecordKey("conflict", entry.path),
+  })));
+  const db = await openSyncDatabase();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(SYNC_STORE, "readwrite");
+    const store = transaction.objectStore(SYNC_STORE);
+    for (const entry of prepared) {
+      if (entry.checkpoint) store.put(entry.checkpoint);
+      else store.delete(entry.checkpointKey);
+      if (entry.acknowledge) {
+        store.delete(entry.outboxKey);
+        store.delete(entry.conflictKey);
+      }
+    }
+    transaction.oncomplete = () => { db.close(); resolve(); };
+    transaction.onerror = () => { db.close(); reject(transaction.error || new Error("Could not save sync checkpoints.")); };
+    transaction.onabort = () => { db.close(); reject(transaction.error || new Error("Saving sync checkpoints was interrupted.")); };
+  });
+}
+
 export async function saveGitHubConflict(path: string, base: Blob | undefined, local: Blob | undefined, remote: Blob | undefined, reason: string) {
   await saveSyncRecord({ key: syncRecordKey("conflict", path), base, local, remote, message: reason, updatedAt: new Date().toISOString() });
 }
 
 export async function saveGitHubRecoveryCopy(path: string, base: Blob | undefined, local: Blob | undefined, remote: Blob | undefined, reason: string) {
   await saveSyncRecord({ key: syncRecordKey("recovery", path), base, local, remote, message: reason, updatedAt: new Date().toISOString() });
+}
+
+const safetyBackupKey = () => syncRecordKey("safety-backup", "latest");
+export async function saveGitHubSafetyBackup(blob: Blob) {
+  await saveSyncRecord({ key: safetyBackupKey(), blob, updatedAt: new Date().toISOString() });
+}
+export async function getGitHubSafetyBackup() {
+  return (await readSyncRecord(safetyBackupKey()))?.blob;
 }
 
 export async function listGitHubConflicts(): Promise<Array<{ path: string; message: string; local?: Blob; remote?: Blob }>> {
@@ -252,6 +303,13 @@ function mergeJson(base: any, local: any, remote: any, location: string, conflic
 }
 
 export async function mergeGitHubFile(path: string, base: Blob | undefined, local: Blob | undefined, remote: Blob | undefined, prefer: "local" | "remote" = "local"): Promise<GitHubMergeResult> {
+  const isMindMapRecord = path.startsWith("mind-maps/maps/") && path.endsWith(".json");
+  if (isMindMapRecord) {
+    const [localValid, remoteValid] = await Promise.all([isValidMindMapBackupRecord(local), isValidMindMapBackupRecord(remote)]);
+    if (localValid && !remoteValid) return { blob: local, conflict: true, reason: "The GitHub mind map record was invalid; kept the intact local map." };
+    if (!localValid && remoteValid) return { blob: remote, conflict: true, reason: "The local mind map record was invalid; kept the intact GitHub map." };
+    if (!localValid && !remoteValid) return { blob: prefer === "local" ? local : remote, conflict: true, reason: "Both copies of this mind map are invalid; kept the selected copy for recovery." };
+  }
   if (!local && !remote) return { conflict: false };
   if (!local) {
     if (!base) return { blob: remote, conflict: false };
@@ -268,6 +326,18 @@ export async function mergeGitHubFile(path: string, base: Blob | undefined, loca
   }
   const localHash = await hashBlob(local); const remoteHash = await hashBlob(remote);
   if (localHash === remoteHash) return { blob: local, conflict: false };
+  // A mind-map file is an envelope containing two coupled values (metadata and
+  // XML). Generic recursive JSON merging can combine fields from different
+  // versions into an envelope that passes JSON parsing but is not restorable.
+  // Treat it as one record and preserve the selected side intact instead.
+  if (isMindMapRecord) {
+    if (base) {
+      const baseHash = await hashBlob(base);
+      if (localHash === baseHash) return { blob: remote, conflict: false };
+      if (remoteHash === baseHash) return { blob: local, conflict: false };
+    }
+    return { blob: prefer === "local" ? local : remote, conflict: true, reason: "Both devices changed this mind map; kept the selected complete map record." };
+  }
   if (!base) {
     const indexField = path === "canvases/index.json" ? "canvasIds" : path === "mind-maps/state-index.json" ? "keys" : "";
     if (indexField) {
@@ -304,13 +374,13 @@ export async function collectAlleviateGitHubFiles(): Promise<GitHubBackupFile[]>
   }).filter((entry): entry is readonly [string, string] => Boolean(entry));
   const values = new Map(localEntries);
 
-  const canvasDocuments = await loadCanvasDocuments<any>().catch(() => {
-    try { const value = JSON.parse(values.get(CANVAS_KEY) || "[]"); return Array.isArray(value) ? value : []; } catch { return []; }
-  });
+  const canvasDocuments = await loadCanvasDocuments<any>();
   const imageIndexes = new Map<string, any[]>();
   putJson("canvases/index.json", { version: 1, canvasIds: canvasDocuments.map((canvas) => String(canvas.id)) });
   for (const canvas of canvasDocuments as any[]) {
-    if (!canvas?.id) continue;
+    if (!canvas || typeof canvas.id !== "string" || !canvas.id.trim() || !Array.isArray(canvas.elements)) {
+      throw new Error("GitHub sync stopped because a local canvas document is unreadable. Local data was left unchanged.");
+    }
     const { files: legacyFiles, ...document } = canvas;
     putJson(`canvases/${pathId(String(canvas.id))}/canvas.json`, document);
     for (const [fileId, file] of Object.entries(legacyFiles || {}) as Array<[string, any]>) {
@@ -326,14 +396,25 @@ export async function collectAlleviateGitHubFiles(): Promise<GitHubBackupFile[]>
       } catch { /* Skip a malformed legacy inline image while backing up the other files. */ }
     }
   }
-  putJson("canvases/workspace.json", (() => { try { return JSON.parse(values.get(WORKSPACE_KEY) || "{}"); } catch { return {}; } })());
+  let canvasWorkspace: unknown = {};
+  try { canvasWorkspace = JSON.parse(values.get(WORKSPACE_KEY) || "{}"); }
+  catch { throw new Error("GitHub sync stopped because the local canvas workspace is unreadable. Local data was left unchanged."); }
+  putJson("canvases/workspace.json", canvasWorkspace);
 
-  const maps = (() => { try { const value = JSON.parse(values.get(MAPS_KEY) || "[]"); return Array.isArray(value) ? value : []; } catch { return []; } })();
+  let maps: any[];
+  try {
+    const value = JSON.parse(values.get(MAPS_KEY) || "[]");
+    if (!Array.isArray(value) || value.some((map) => !map || typeof map.id !== "string" || !map.id.trim() || typeof map.title !== "string" || !map.title.trim())) throw new Error();
+    maps = value;
+  } catch { throw new Error("GitHub sync stopped because the local mind map list is unreadable. Local data was left unchanged."); }
   putJson("mind-maps/index.json", { version: 1, mapIds: maps.map((map: any) => String(map.id)) });
-  maps.forEach((map: any) => {
-    if (!map?.id) return;
-    putJson(`mind-maps/maps/${pathId(String(map.id))}.json`, { map, xml: values.get(`${map.id}-xml`) || "" });
-  });
+  for (const map of maps) {
+    const xml = values.get(`${map.id}-xml`);
+    if (typeof xml !== "string" || !xml.trim()) throw new Error(`GitHub sync stopped because the local mind map “${map.title}” has no saved map data. Local data was left unchanged.`);
+    const record = textBlob(JSON.stringify({ map, xml }, null, 2));
+    if (!await isValidMindMapBackupRecord(record)) throw new Error(`GitHub sync stopped because the local mind map “${map.title}” is invalid. Local data was left unchanged.`);
+    files.set(`mind-maps/maps/${pathId(String(map.id))}.json`, record);
+  }
   const mindMapStateKeys = localEntries.map(([key]) => key).filter((key) => key.startsWith("alleviate-wisemapping-") || key.startsWith("alleviate-resources-default-"));
   putJson("mind-maps/state-index.json", { keys: mindMapStateKeys });
   mindMapStateKeys.forEach((key) => putJson(`mind-maps/state/${pathId(key)}.json`, { key, value: values.get(key) ?? "" }));
@@ -377,7 +458,7 @@ export async function collectAlleviateGitHubFiles(): Promise<GitHubBackupFile[]>
 
 const readBlobText = async (blob: Blob) => blob.text();
 
-export async function applyAlleviateGitHubChanges(downloads: Array<{ path: string; blob: Blob }>, deletedPaths: string[] = []) {
+async function applyAlleviateGitHubChangesUnchecked(downloads: Array<{ path: string; blob: Blob }>, deletedPaths: string[] = []) {
   const localStorageWrites = new Map<string, string>();
   const canvasWrites = new Map<string, any>();
   const mindMapWrites = new Map<string, any>();
@@ -404,7 +485,14 @@ export async function applyAlleviateGitHubChanges(downloads: Array<{ path: strin
       if (isStorageEntry) { storageKeyFromBackupPath(item.path); continue; }
       if (!parsed || typeof parsed !== "object") throw new Error(`GitHub sync stopped: ${item.path} has an invalid data shape. Local data was left unchanged.`);
       if (item.path.startsWith("canvases/") && item.path.endsWith("/canvas.json") && (typeof parsed.id !== "string" || !Array.isArray(parsed.elements))) throw new Error(`GitHub sync stopped: ${item.path} is not a valid canvas document.`);
-      if (item.path.startsWith("mind-maps/maps/") && item.path.endsWith(".json") && (typeof parsed.map?.id !== "string" || typeof parsed.xml !== "string")) throw new Error(`GitHub sync stopped: ${item.path} is not a valid mind map file.`);
+      if (item.path.startsWith("mind-maps/maps/") && item.path.endsWith(".json")) {
+        const id = parsed.map?.id;
+        const xml = parsed.xml;
+        if (typeof id !== "string" || !id.trim() || typeof xml !== "string" || !xml.trim() || !await isValidMindMapBackupRecord(item.blob)) {
+          const missing = [typeof id !== "string" || !id.trim() ? "map.id" : "", typeof xml !== "string" || !xml.trim() ? "xml" : ""].filter(Boolean).join(" and ");
+          throw new Error(`GitHub sync stopped: ${item.path} has an invalid mind map record (${missing} ${missing.includes(" and ") ? "are" : "is"} missing or empty). Local data was left unchanged.`);
+        }
+      }
     }
   }
 
@@ -447,9 +535,7 @@ export async function applyAlleviateGitHubChanges(downloads: Array<{ path: strin
     if (parts[0] === "mind-maps" && parts[1] === "state" && parts[2]?.endsWith(".json")) { try { const key = fromPathId(parts[2].slice(0, -5)); if (!isSensitiveStorageKey(key)) removedStorageKeys.add(key); } catch { /* Ignore malformed keys. */ } }
   }
 
-  const currentCanvases = await loadCanvasDocuments<any>().catch(() => {
-    try { const value = JSON.parse(localStorage.getItem(CANVAS_KEY) || "[]"); return Array.isArray(value) ? value : []; } catch { return []; }
-  });
+  const currentCanvases = await loadCanvasDocuments<any>();
   const canvasMap = new Map<string, any>(currentCanvases.map((canvas: any) => [String(canvas.id), canvas]));
   canvasWrites.forEach((canvas, id) => canvasMap.set(id, canvas));
   removedCanvasIds.forEach((id) => canvasMap.delete(id));
@@ -494,6 +580,24 @@ export async function applyAlleviateGitHubChanges(downloads: Array<{ path: strin
   for (const id of removedPdfIds) await removeRecord("alleviate-books-v1", "pdf-files", "id", id);
   window.dispatchEvent(new Event("storage"));
   window.dispatchEvent(new Event("alleviate-data-restored"));
+}
+
+export async function applyAlleviateGitHubChanges(downloads: Array<{ path: string; blob: Blob }>, deletedPaths: string[] = [], rollbackSnapshot?: Blob) {
+  const backup = rollbackSnapshot || await createAppBackup();
+  try {
+    await applyAlleviateGitHubChangesUnchecked(downloads, deletedPaths);
+  } catch (error) {
+    try {
+      const archive = new File([backup], "alleviate-pre-sync-recovery.zip", { type: "application/zip" });
+      await restoreAppBackup(await parseAppBackup(archive));
+    } catch (rollbackError) {
+      const original = error instanceof Error ? error.message : "GitHub changes could not be applied.";
+      const rollback = rollbackError instanceof Error ? rollbackError.message : "The local snapshot could not be restored.";
+      throw new Error(`${original} Automatic local rollback also failed: ${rollback}. Use your downloaded local backup to recover.`);
+    }
+    const message = error instanceof Error ? error.message : "GitHub changes could not be applied.";
+    throw new Error(`${message} The device was restored from its pre-sync snapshot.`);
+  }
 }
 
 export function encodeBlobBase64(blob: Blob): Promise<string> {

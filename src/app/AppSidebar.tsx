@@ -2,18 +2,18 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Activity, ArrowDownUp, CalendarDays, Check, CheckSquare, Download, ExternalLink, FolderOpen, Github, Grid2X2, Home, Hourglass, LoaderCircle, Pencil, RefreshCw, Settings2, Upload, X, GitPullRequest, UploadCloud } from "lucide-react";
+import { Activity, ArrowDownUp, CalendarDays, Check, CheckSquare, Download, ExternalLink, FolderOpen, Grid2X2, Home, Hourglass, LoaderCircle, MoreHorizontal, Pencil, RefreshCw, Settings2, Upload, X } from "lucide-react";
 import { useAppDialogs } from "./AppDialogs";
 import { createAppBackup, downloadAppBackup, parseAppBackup, restoreAppBackup } from "../lib/appBackup";
 import { requestAppApi } from "../lib/desktopAuth";
-import { applyAlleviateGitHubChanges, clearGitHubConflict, collectAlleviateGitHubFiles, decodeBase64Blob, encodeBlobBase64, getGitHubCheckpoint, getGitHubLastSyncAt, hashBlob, isSensitiveGitHubBackupPath, listGitHubConflicts, mergeGitHubFile, saveGitHubCheckpoint, saveGitHubLastSyncAt, saveGitHubRecoveryCopy, setGitHubSyncScope, stageGitHubOutbox, type GitHubBackupManifest } from "../lib/githubBackup";
+import { applyAlleviateGitHubChanges, clearGitHubConflict, collectAlleviateGitHubFiles, decodeBase64Blob, encodeBlobBase64, getGitHubCheckpoint, getGitHubLastSyncAt, getGitHubSafetyBackup, hashBlob, isSensitiveGitHubBackupPath, isValidMindMapBackupRecord, listGitHubConflicts, mergeGitHubFile, saveGitHubCheckpoint, saveGitHubCheckpointBatch, saveGitHubLastSyncAt, saveGitHubRecoveryCopy, saveGitHubSafetyBackup, setGitHubSyncScope, stageGitHubOutbox, type GitHubBackupManifest } from "../lib/githubBackup";
 
 type AppSection = "home" | "canvas" | "books" | "mind-map" | "feedback-loop" | "countdown" | "calendar" | "eisenhower" | "tasks" | "tracking" | "support";
 type AutoBackupSettings = { directoryPath: string; lastRunWeek: string; lastRunAt: string; lastFilePath: string };
 const AUTO_BACKUP_SETTINGS_KEY = "alleviate-auto-backup-settings-v1";
 const profileKey = (username: string) => `alleviate-profile-v1:${username || "guest"}`;
 type GitHubSettings = { githubToken: string; githubOwner: string; githubRepo: string; githubPath: string };
-type GitHubSyncProgress = { mode: "push" | "pull"; status: "running" | "success" | "error" | "cancelled"; title: string; logs: string[]; processed: number; total: number; uploaded: number; skipped: number };
+type GitHubSyncProgress = { mode: "sync" | "pull"; status: "running" | "success" | "error" | "cancelled"; title: string; logs: string[]; processed: number; total: number; uploaded: number; skipped: number };
 const emptyGitHubSettings: GitHubSettings = { githubToken: "", githubOwner: "", githubRepo: "", githubPath: "" };
 const isSafeBackupPath = (path: string) => /^(canvases|mind-maps|app-data|books)\//.test(path) && path.split("/").every((part) => Boolean(part) && part !== "." && part !== ".." && /^[A-Za-z0-9._-]+$/.test(part));
 const isValidBackupManifest = (manifest: GitHubBackupManifest) => Boolean(manifest && manifest.format === "alleviate-github-backup" && manifest.version === 1 && manifest.files && typeof manifest.files === "object" && !Array.isArray(manifest.files) && Object.entries(manifest.files).every(([path, hash]) => isSafeBackupPath(path) && typeof hash === "string" && /^[a-f0-9]{64}$/i.test(hash)) && (manifest.deleted === undefined || Array.isArray(manifest.deleted) && manifest.deleted.every(isSafeBackupPath)));
@@ -293,6 +293,29 @@ export default function AppSidebar({ active }: { active: AppSection }) {
     return response.json().catch(() => ({}));
   };
 
+  const requestGitHubBlob = async (username: string, config: GitHubSettings, filePath: string): Promise<Blob> => {
+    // Read JSON through GitHub's Contents API to avoid stale raw/CDN responses
+    // during comparisons. Keep raw downloads for binary and large files.
+    if (filePath.toLowerCase().endsWith(".json")) {
+      const file = await requestGitHubFile("GET", username, config, filePath) as { content?: unknown; encoding?: unknown };
+      if (typeof file.content === "string" && file.encoding === "base64") return decodeBase64Blob(file.content, "application/json;charset=utf-8");
+    }
+    return await requestGitHubFile("GET", username, config, filePath, undefined, true) as Blob;
+  };
+
+  const requestGitHubBlobAtHash = async (username: string, config: GitHubSettings, filePath: string, expectedHash: string): Promise<Blob> => {
+    let latest: Blob | undefined;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      latest = await requestGitHubBlob(username, config, filePath);
+      if (await hashBlob(latest) === expectedHash) return latest;
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
+    }
+    // A contents file can be newer than its manifest if a prior sync stopped
+    // between uploading data and publishing the manifest. Reconcile the actual
+    // file as remote state; the next manifest publication will record its hash.
+    return latest!;
+  };
+
   const requestGitHubManifest = async (username: string, config: GitHubSettings, manifestPath: string) => {
     const file = await requestGitHubFile("GET", username, config, manifestPath) as { content?: unknown; encoding?: unknown; sha?: unknown };
     if (typeof file.content !== "string" || file.encoding !== "base64") {
@@ -330,7 +353,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
       }
     }
     setGitHubMenuOpen(false); setGitHubBusy(action);
-    setGitHubProgress({ mode: action === "pull" ? "pull" : "push", status: "running", title: action === "pull" ? "GitHub Pull Running" : action === "hard-push" ? "GitHub Hard Push Running" : "GitHub Push Running", logs: ["Connecting to GitHub…"], processed: 0, total: 0, uploaded: 0, skipped: 0 });
+    setGitHubProgress({ mode: action === "pull" ? "pull" : "sync", status: "running", title: action === "pull" ? "GitHub Pull Running" : "GitHub Sync Running", logs: ["Connecting to GitHub…"], processed: 0, total: 0, uploaded: 0, skipped: 0 });
     try {
       const { username, config, rootPath, legacyFilePath } = await getGitHubConfig();
       const remoteLockPath = [rootPath, ".alleviate-sync-lock.json"].filter(Boolean).join("/");
@@ -344,15 +367,15 @@ export default function AppSidebar({ active }: { active: AppSection }) {
         lockQueue = next.then(() => undefined, () => undefined);
         return next;
       };
-      const readRemoteLock = async (): Promise<{ token: string; expiresAt: number; sha?: string } | null> => {
+      const readRemoteLock = async (): Promise<{ token: string; expiresAt: number; sha?: string; client?: string; owner?: string } | null> => {
         try {
           const file = await requestGitHubFile("GET", username, config, remoteLockPath) as { content?: unknown; encoding?: unknown; sha?: unknown };
           if (typeof file.content !== "string" || file.encoding !== "base64") throw new Error("The GitHub sync lock file is unreadable. Remove .alleviate-sync-lock.json from the backup folder, then retry.");
-          let data: { token?: unknown; expiresAt?: unknown };
+          let data: { token?: unknown; expiresAt?: unknown; client?: unknown; owner?: unknown };
           try { data = JSON.parse(await decodeBase64Blob(file.content, "application/json").text()); }
           catch { throw new Error("The GitHub sync lock file is invalid. Remove .alleviate-sync-lock.json from the backup folder, then retry."); }
           if (typeof data.token !== "string" || typeof data.expiresAt !== "number") throw new Error("The GitHub sync lock file is unsupported. Remove .alleviate-sync-lock.json from the backup folder, then retry.");
-          return { token: data.token, expiresAt: data.expiresAt, sha: typeof file.sha === "string" ? file.sha : undefined };
+          return { token: data.token, expiresAt: data.expiresAt, sha: typeof file.sha === "string" ? file.sha : undefined, client: typeof data.client === "string" ? data.client : "unknown", owner: typeof data.owner === "string" ? data.owner : "" };
         } catch (error) {
           if ((error as Error & { status?: number }).status === 404) return null;
           throw error;
@@ -361,12 +384,15 @@ export default function AppSidebar({ active }: { active: AppSection }) {
       const writeRemoteLock = async (sha: string | undefined, expiresAt: number) => {
         const body: Record<string, unknown> = {
           message: "Alleviate sync lock",
-          content: await encodeBlobBase64(new Blob([JSON.stringify({ token: lockToken, expiresAt, client: typeof window !== "undefined" && (window as Window & { alleviateDesktop?: { isDesktop?: boolean } }).alleviateDesktop?.isDesktop ? "desktop" : "browser" })], { type: "application/json" })),
+          content: await encodeBlobBase64(new Blob([JSON.stringify({ token: lockToken, expiresAt, client: typeof window !== "undefined" && (window as Window & { alleviateDesktop?: { isDesktop?: boolean } }).alleviateDesktop?.isDesktop ? "desktop" : "browser", owner: `${username}@${typeof window !== "undefined" ? window.location.host : "unknown"}` })], { type: "application/json" })),
         };
         if (sha) body.sha = sha;
         await requestGitHubFile("PUT", username, config, remoteLockPath, body);
         const saved = await readRemoteLock();
-        if (!saved || saved.token !== lockToken) throw new Error("Another Alleviate client took the GitHub sync lock. This sync stopped before continuing.");
+        if (!saved || saved.token !== lockToken) {
+          const owner = saved?.owner || `an unidentified ${saved?.client || "Alleviate"} client`;
+          throw new Error(`GitHub sync lock was replaced by ${owner}. This sync stopped before continuing.`);
+        }
         lockSha = saved.sha;
       };
       let remoteLockTimer: number | undefined;
@@ -401,9 +427,14 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           void serializedLockWork(async () => {
             try {
               const current = await readRemoteLock();
-              if (!current || current.token !== lockToken) { lockLost = true; return; }
+              if (!current || current.token !== lockToken || current.expiresAt <= Date.now()) { lockLost = true; return; }
               await writeRemoteLock(current.sha, Date.now() + lockTtlMs);
-            } catch { lockLost = true; }
+            } catch (error) {
+              // A temporary network/API failure during the heartbeat does not prove
+              // that another client owns the lock. Retry on the next heartbeat and
+              // let the lease check below make the ownership decision.
+              // The next heartbeat or guarded write will retry verification.
+            }
           });
         }, 20_000);
         releaseRemoteSyncLock = async () => {
@@ -418,17 +449,29 @@ export default function AppSidebar({ active }: { active: AppSection }) {
         return true;
       };
       const assertRemoteLock = async () => serializedLockWork(async () => {
-        if (lockLost) throw new Error("Another client stopped this sync by taking over the GitHub lock. No further files will be written.");
-        const current = await readRemoteLock();
-        if (!current || current.token !== lockToken) {
+        if (lockLost) throw new Error("The GitHub sync lock was lost. No further files will be written.");
+        let current: Awaited<ReturnType<typeof readRemoteLock>>;
+        try { current = await readRemoteLock(); }
+        catch (error) {
+          const reason = error instanceof Error ? error.message : "GitHub could not be reached.";
+          throw new Error(`Could not verify the GitHub sync lock because of a temporary GitHub/API error: ${reason}. No further files will be written until ownership can be confirmed.`);
+        }
+        if (!current || current.token !== lockToken || current.expiresAt <= Date.now()) {
           lockLost = true;
-          throw new Error("Another client stopped this sync by taking over the GitHub lock. No further files will be written.");
+          const owner = current?.owner || `an unidentified ${current?.client || "Alleviate"} client`;
+          throw new Error(current?.token === lockToken
+            ? "The GitHub sync lock expired before the next write. No further files will be written; start a new sync."
+            : `Another Alleviate client (${owner}) replaced the GitHub sync lock. No further files will be written.`);
         }
         lockSha = current.sha;
       });
       if (!await acquireRemoteLock()) return false;
-      reportGitHubProgress(`Connected to ${config.githubOwner}/${config.githubRepo}${rootPath ? ` · ${rootPath}` : " · repository root"}.`);
       setGitHubSyncScope(`${username}:${config.githubOwner.trim().toLowerCase()}/${config.githubRepo.trim().toLowerCase()}/${rootPath}`);
+      reportGitHubProgress("Creating a local recovery snapshot…");
+      const safetyBackup = await createAppBackup();
+      await saveGitHubSafetyBackup(safetyBackup);
+      reportGitHubProgress("Local recovery snapshot saved before sync.");
+      reportGitHubProgress(`Connected to ${config.githubOwner}/${config.githubRepo}${rootPath ? ` · ${rootPath}` : " · repository root"}.`);
       const manifestPath = [rootPath, "manifest.json"].filter(Boolean).join("/");
       if (action === "pull") {
         let remoteManifest: GitHubBackupManifest;
@@ -467,6 +510,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
         const localByPath = new Map(localFiles.map((file) => [file.path, file]));
         const downloads: Array<{ path: string; blob: Blob }> = [];
         const checkpoints: Array<{ path: string; blob: Blob; acknowledge: boolean }> = [];
+        const checkpointDeletions: string[] = [];
         let autoResolvedCount = 0;
         let pullProcessed = 0;
         let pullSkipped = 0;
@@ -483,8 +527,15 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           const base = await getGitHubCheckpoint(path);
           await stageGitHubOutbox(path, local);
           const localHash = local ? await hashBlob(local) : undefined;
-          if (localHash === remoteHash) { const same = local!; checkpoints.push({ path, blob: same, acknowledge: true }); await clearGitHubConflict(path); pullProcessed += 1; pullSkipped += 1; reportGitHubProgress(`Already current · ${path}`, { processed: pullProcessed, skipped: pullSkipped }); continue; }
-          const remote = await requestGitHubFile("GET", username, config, [rootPath, path].filter(Boolean).join("/"), undefined, true) as Blob;
+          if (localHash === remoteHash) { const same = local!; checkpoints.push({ path, blob: same, acknowledge: true }); await clearGitHubConflict(path); pullProcessed += 1; pullSkipped += 1; reportGitHubProgress(`Already current · ${path}`, { processed: pullProcessed }); continue; }
+          const remote = await requestGitHubBlobAtHash(username, config, [rootPath, path].filter(Boolean).join("/"), remoteHash);
+          if (path.startsWith("mind-maps/maps/") && path.endsWith(".json") && !await isValidMindMapBackupRecord(remote)) {
+            if (local) await saveGitHubRecoveryCopy(path, base, local, remote, "GitHub contains an invalid mind map record; the intact local map was preserved.");
+            reportGitHubProgress(`Skipped invalid remote mind map; preserved local data · ${path}`);
+            pullProcessed += 1;
+            pullSkipped += 1;
+            continue;
+          }
           const merged = firstPullOnThisDevice
             ? { blob: remote, conflict: false }
             : await mergeGitHubFile(path, base, local, remote, "remote");
@@ -505,10 +556,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
         }
         const deletionsToApply: string[] = [];
         const remoteDeletedPaths = (remoteManifest.deleted || []).filter((path) => !remoteManifest.files[path]);
-        const firstPullLocalOnlyPaths = firstPullOnThisDevice
-          ? localFiles.map((file) => file.path).filter((path) => !remoteManifest.files[path] && !remoteDeletedPaths.includes(path))
-          : [];
-        for (const path of [...new Set([...remoteDeletedPaths, ...firstPullLocalOnlyPaths])]) {
+        for (const path of new Set(remoteDeletedPaths)) {
           if (remoteManifest.files[path]) continue;
           reportGitHubProgress(`Checking remote deletion · ${path}`);
           const local = localByPath.get(path)?.blob;
@@ -520,26 +568,35 @@ export default function AppSidebar({ active }: { active: AppSection }) {
               reportGitHubProgress(`Saved first-pull recovery copy · ${path}`);
             }
             deletionsToApply.push(path);
-            await saveGitHubCheckpoint(path);
+            checkpointDeletions.push(path);
             await clearGitHubConflict(path);
           } else if (!local || !base || await hashBlob(local) === await hashBlob(base)) {
-            deletionsToApply.push(path);
-            await saveGitHubCheckpoint(path);
-            await clearGitHubConflict(path);
+            if (base && await hashBlob(local!) === await hashBlob(base)) {
+              deletionsToApply.push(path);
+              checkpointDeletions.push(path);
+              await clearGitHubConflict(path);
+            } else if (local) {
+              checkpoints.push({ path, blob: base || local, acknowledge: false });
+              await saveGitHubRecoveryCopy(path, base, local, undefined, "Local file is absent from GitHub, but no prior base proves a deliberate deletion. Kept local data.");
+              reportGitHubProgress(`Preserved local-only data · ${path}`);
+            } else {
+              checkpointDeletions.push(path);
+            }
           } else {
             autoResolvedCount += 1;
-            await saveGitHubRecoveryCopy(path, base, local, undefined, "Pull followed GitHub's deletion; the local copy was kept for recovery.");
-            deletionsToApply.push(path);
-            await saveGitHubCheckpoint(path);
-            await clearGitHubConflict(path);
-            reportGitHubProgress(`Auto-resolved deletion · kept GitHub version · ${path}`);
+            await saveGitHubRecoveryCopy(path, base, local, undefined, "Both sides changed after the checkpoint; kept local data because GitHub deleted the remote copy.");
+            checkpoints.push({ path, blob: base, acknowledge: false });
+            reportGitHubProgress(`Preserved local changes after remote deletion · ${path}`);
           }
           pullProcessed += 1;
           reportGitHubProgress(`Processed deletion · ${path}`, { processed: pullProcessed });
         }
         reportGitHubProgress(`Applying ${downloads.length} downloaded file${downloads.length === 1 ? "" : "s"} on this device…`);
-        await applyAlleviateGitHubChanges(downloads, deletionsToApply);
-        for (const checkpoint of checkpoints) await saveGitHubCheckpoint(checkpoint.path, checkpoint.blob, checkpoint.acknowledge);
+        await applyAlleviateGitHubChanges(downloads, deletionsToApply, safetyBackup);
+        await saveGitHubCheckpointBatch([
+          ...checkpoints,
+          ...checkpointDeletions.map((path) => ({ path, blob: undefined, acknowledge: true })),
+        ]);
         const pullSummary = `Downloaded/merged ${downloads.length} · Already current ${pullSkipped} · Auto-resolved ${autoResolvedCount}`;
         setGitHubProgress((current) => current ? { ...current, status: "success", title: "GitHub Pull Complete", processed: pullTotal, total: pullTotal, skipped: pullSkipped, logs: [...current.logs, pullSummary].slice(-8) } : current);
         if (!options.silent) await dialogs.alert({ title: "GitHub pull complete", message: `Merged ${downloads.length} changed files from GitHub. Automatically resolved ${autoResolvedCount} conflict(s); recovery copies were saved on this device.` });
@@ -558,14 +615,39 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           try { remoteItems = await requestGitHubFile("GET", username, config, rootPath); }
           catch (error) { if ((error as Error & { status?: number }).status !== 404) throw error; }
           if (!Array.isArray(remoteItems) || remoteItems.some((item) => item && typeof item === "object" && (item as { name?: unknown }).name !== ".alleviate-sync-lock.json")) {
-            throw new Error("No Alleviate manifest was found, but this GitHub backup folder already contains files. Push was stopped to protect them. Use Pull to restore a legacy backup, or choose an empty backup folder in GitHub settings.");
+            throw new Error("No Alleviate manifest was found, but this GitHub backup folder already contains files. Sync was stopped to protect them. Restore the legacy archive locally first, or choose an empty backup folder in GitHub settings.");
           }
         }
         let autoResolvedCount = 0;
+        const remoteMergeCheckpoints: Array<{ path: string; blob: Blob; acknowledge?: boolean }> = [];
+        const remoteDeletionCheckpoints: string[] = [];
+        if (previousManifest && action !== "hard-push") {
+          const localByPath = new Map(snapshot.map((file) => [file.path, file]));
+          const deletionsToApply: string[] = [];
+          for (const path of new Set(previousManifest.deleted || [])) {
+            if (previousManifest.files[path] || isSensitiveGitHubBackupPath(path)) continue;
+            const local = localByPath.get(path)?.blob;
+            const base = await getGitHubCheckpoint(path);
+            if (!local) {
+              remoteDeletionCheckpoints.push(path);
+              continue;
+            }
+            if (base && await hashBlob(local) === await hashBlob(base)) {
+              deletionsToApply.push(path);
+              remoteDeletionCheckpoints.push(path);
+            } else {
+              await saveGitHubRecoveryCopy(path, base, local, undefined, "GitHub has a deletion marker, but this device has a newer or uncheckpointed copy. Kept the local file.");
+              reportGitHubProgress(`Preserved local changes after GitHub deletion · ${path}`);
+            }
+          }
+          if (deletionsToApply.length) {
+            await applyAlleviateGitHubChanges([], deletionsToApply, safetyBackup);
+            snapshot = await collectAlleviateGitHubFiles();
+          }
+        }
         if (previousManifest && action !== "hard-push") {
           const localByPath = new Map(snapshot.map((file) => [file.path, file]));
           const remoteMerges: Array<{ path: string; blob: Blob }> = [];
-          const checkpoints: Array<{ path: string; blob: Blob }> = [];
           let mergeProcessed = 0;
           reportGitHubProgress(`Comparing ${Object.keys(previousManifest.files).length} remote files before upload…`, { total: Object.keys(previousManifest.files).length, processed: 0 });
           for (const [path, remoteHash] of Object.entries(previousManifest.files)) {
@@ -581,8 +663,8 @@ export default function AppSidebar({ active }: { active: AppSection }) {
             const base = await getGitHubCheckpoint(path);
             await stageGitHubOutbox(path, local);
             const localHash = local ? await hashBlob(local) : undefined;
-            if (localHash === remoteHash) { checkpoints.push({ path, blob: local! }); await clearGitHubConflict(path); mergeProcessed += 1; reportGitHubProgress(`Already current · ${path}`, { processed: mergeProcessed }); continue; }
-            const remote = await requestGitHubFile("GET", username, config, [rootPath, path].filter(Boolean).join("/"), undefined, true) as Blob;
+            if (localHash === remoteHash) { await clearGitHubConflict(path); mergeProcessed += 1; reportGitHubProgress(`Already current · ${path}`, { processed: mergeProcessed }); continue; }
+            const remote = await requestGitHubBlobAtHash(username, config, [rootPath, path].filter(Boolean).join("/"), remoteHash);
             const merged = await mergeGitHubFile(path, base, local, remote, "local");
             if (merged.conflict) {
               autoResolvedCount += 1;
@@ -592,24 +674,38 @@ export default function AppSidebar({ active }: { active: AppSection }) {
             }
             await clearGitHubConflict(path);
             if (merged.blob && (!local || await hashBlob(merged.blob) !== localHash)) remoteMerges.push({ path, blob: merged.blob });
-            checkpoints.push({ path, blob: remote });
+            remoteMergeCheckpoints.push({ path, blob: remote, acknowledge: false });
             mergeProcessed += 1;
             if (!merged.conflict) reportGitHubProgress(`Compared · ${path}`, { processed: mergeProcessed });
           }
-          if (remoteMerges.length) await applyAlleviateGitHubChanges(remoteMerges);
-          for (const checkpoint of checkpoints) await saveGitHubCheckpoint(checkpoint.path, checkpoint.blob, false);
+          if (remoteMerges.length) await applyAlleviateGitHubChanges(remoteMerges, [], safetyBackup);
+          // Checkpoints are committed only after the manifest succeeds below.
           // Pull files created by another device since this device's last sync.
-          for (const [path] of Object.entries(previousManifest.files)) if (!localByPath.has(path)) {
-            const remote = await requestGitHubFile("GET", username, config, [rootPath, path].filter(Boolean).join("/"), undefined, true) as Blob;
+          for (const [path, remoteHash] of Object.entries(previousManifest.files)) if (!localByPath.has(path)) {
+            const remote = await requestGitHubBlobAtHash(username, config, [rootPath, path].filter(Boolean).join("/"), remoteHash);
             const base = await getGitHubCheckpoint(path);
-            if (!base) { await applyAlleviateGitHubChanges([{ path, blob: remote }]); await saveGitHubCheckpoint(path, remote); }
+            if (!base) {
+              if (path.startsWith("mind-maps/maps/") && path.endsWith(".json") && !await isValidMindMapBackupRecord(remote)) {
+                reportGitHubProgress(`Skipped invalid remote mind map; kept local data · ${path}`);
+                continue;
+              }
+              await applyAlleviateGitHubChanges([{ path, blob: remote }], [], safetyBackup);
+              remoteMergeCheckpoints.push({ path, blob: remote, acknowledge: false });
+            }
           }
           snapshot = await collectAlleviateGitHubFiles();
         }
         const previousHashes = previousManifest?.files || {};
         const nextHashes = Object.fromEntries(snapshot.map(({ path, hash }) => [path, hash]).sort(([left], [right]) => String(left).localeCompare(String(right))));
         const stalePaths = Object.keys(previousHashes).filter((path) => !(path in nextHashes));
-        let deleted = Array.from(new Set([...(previousManifest?.deleted || []), ...stalePaths])).filter((path) => !(path in nextHashes)).sort();
+        if (action !== "hard-push" && stalePaths.length) {
+          // A missing local file may mean storage failed or this device has not
+          // downloaded it yet. Preserve the remote record; absence alone is not
+          // enough evidence to delete user data from GitHub.
+          for (const path of stalePaths) nextHashes[path] = previousHashes[path];
+          reportGitHubProgress(`Preserving ${stalePaths.length} GitHub file${stalePaths.length === 1 ? "" : "s"} not present in this local snapshot.`);
+        }
+        let deleted = Array.from(new Set(previousManifest?.deleted || [])).filter((path) => !(path in nextHashes)).sort();
         if (action === "hard-push") {
           reportGitHubProgress("Waiting for hard push confirmation…");
           const confirmed = await dialogs.confirm({ title: "Hard push Alleviate data?", message: "Hard Push replaces every file tracked by the Alleviate backup on GitHub with this device’s data and removes tracked files deleted here. Remote-only backup files will also be removed.", confirmLabel: "Hard push", destructive: true });
@@ -619,12 +715,13 @@ export default function AppSidebar({ active }: { active: AppSection }) {
         let fileProcessed = 0;
         let fileUploaded = 0;
         let fileSkipped = 0;
+        const checkpointUpdates = new Map<string, { path: string; blob?: Blob; acknowledge?: boolean }>();
         reportGitHubProgress(`Ready to sync ${snapshot.length} local files. Uploading changed files…`, { total: snapshot.length, processed: 0, uploaded: 0, skipped: 0 });
         const mergedDownloads: Array<{ path: string; blob: Blob }> = [];
         for (const file of snapshot) {
           reportGitHubProgress(`Checking ${file.path}…`);
           if (action !== "hard-push" && previousHashes[file.path] === file.hash) {
-            await saveGitHubCheckpoint(file.path, file.blob, true);
+            checkpointUpdates.set(file.path, { path: file.path, blob: file.blob, acknowledge: true });
             await clearGitHubConflict(file.path);
             fileProcessed += 1; fileSkipped += 1;
             reportGitHubProgress(`Unchanged · ${file.path}`, { processed: fileProcessed, skipped: fileSkipped });
@@ -637,7 +734,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
             let remote: Blob | undefined;
             try {
               metadata = await requestGitHubFile("GET", username, config, [rootPath, file.path].filter(Boolean).join("/")) as { sha?: string };
-              remote = await requestGitHubFile("GET", username, config, [rootPath, file.path].filter(Boolean).join("/"), undefined, true) as Blob;
+              remote = await requestGitHubBlob(username, config, [rootPath, file.path].filter(Boolean).join("/"));
             } catch (error) { if ((error as Error & { status?: number }).status !== 404) throw error; }
             const desired = action === "hard-push" ? { blob: file.blob, conflict: false } : await mergeGitHubFile(file.path, base, file.blob, remote, "local");
             if (desired.conflict) {
@@ -651,7 +748,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
             if (remote && await hashBlob(remote) === desiredHash) {
               if (desiredHash !== file.hash) mergedDownloads.push({ path: file.path, blob: desired.blob });
               nextHashes[file.path] = desiredHash;
-              await saveGitHubCheckpoint(file.path, remote, desiredHash === file.hash);
+              checkpointUpdates.set(file.path, { path: file.path, blob: remote, acknowledge: desiredHash === file.hash });
               fileProcessed += 1; fileSkipped += 1;
               reportGitHubProgress(`Already present on GitHub · ${file.path}`, { processed: fileProcessed, skipped: fileSkipped });
               synced = true;
@@ -664,14 +761,14 @@ export default function AppSidebar({ active }: { active: AppSection }) {
               const saved = await requestGitHubFile("PUT", username, config, [rootPath, file.path].filter(Boolean).join("/"), payload) as { content?: { sha?: unknown } };
               let verifiedMatches = false;
               let verifiedBlob = desired.blob;
-              if (action === "hard-push" && typeof saved?.content?.sha === "string") {
+              if (typeof saved?.content?.sha === "string") {
                 // The Contents API response identifies the exact Git blob it committed.
                 // Confirm the current path still points to that blob; an immediate raw
                 // download can briefly return a stale CDN copy and falsely look like a race.
                 const latest = await requestGitHubFile("GET", username, config, [rootPath, file.path].filter(Boolean).join("/")) as { sha?: unknown };
                 verifiedMatches = latest?.sha === saved.content.sha;
               } else {
-                const verified = await requestGitHubFile("GET", username, config, [rootPath, file.path].filter(Boolean).join("/"), undefined, true) as Blob;
+                const verified = await requestGitHubBlob(username, config, [rootPath, file.path].filter(Boolean).join("/"));
                 verifiedBlob = verified;
                 verifiedMatches = await hashBlob(verified) === desiredHash;
               }
@@ -684,7 +781,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
               }
               if (desiredHash !== file.hash) mergedDownloads.push({ path: file.path, blob: desired.blob });
               nextHashes[file.path] = desiredHash;
-              await saveGitHubCheckpoint(file.path, verifiedBlob, true);
+              checkpointUpdates.set(file.path, { path: file.path, blob: verifiedBlob, acknowledge: true });
               pushed += 1;
               fileProcessed += 1; fileUploaded += 1;
               reportGitHubProgress(`Pushed ${file.path}`, { processed: fileProcessed, uploaded: fileUploaded, skipped: fileSkipped });
@@ -699,10 +796,10 @@ export default function AppSidebar({ active }: { active: AppSection }) {
             }
           }
         }
-        if (mergedDownloads.length) await applyAlleviateGitHubChanges(mergedDownloads);
+        if (mergedDownloads.length) await applyAlleviateGitHubChanges(mergedDownloads, [], safetyBackup);
         const pathsToRemove = action === "hard-push"
           ? Array.from(new Set([...stalePaths, ...Object.keys(previousManifest?.files || {}).filter((path) => !(path in nextHashes))])).sort()
-          : stalePaths;
+          : [];
         for (const path of pathsToRemove) {
           reportGitHubProgress(`Checking removed local file · ${path}`);
           await stageGitHubOutbox(path, undefined);
@@ -719,13 +816,19 @@ export default function AppSidebar({ active }: { active: AppSection }) {
               let remoteBlob: Blob;
               try {
                 remote = await requestGitHubFile("GET", username, config, [rootPath, path].filter(Boolean).join("/")) as { sha?: string };
-                remoteBlob = await requestGitHubFile("GET", username, config, [rootPath, path].filter(Boolean).join("/"), undefined, true) as Blob;
+                remoteBlob = await requestGitHubBlob(username, config, [rootPath, path].filter(Boolean).join("/"));
               } catch (error) { if ((error as Error & { status?: number }).status === 404) { removed = true; break; } throw error; }
-              if (action !== "hard-push" && !isSensitiveGitHubBackupPath(path) && (!base || await hashBlob(remoteBlob) !== await hashBlob(base))) {
-                autoResolvedCount += 1;
-                await saveGitHubRecoveryCopy(path, base, undefined, remoteBlob, "Push deleted this remote-only file; its contents were saved locally for recovery.");
-                reportGitHubProgress(`Auto-resolved deletion · saved remote copy for recovery · ${path}`);
+              if (action !== "hard-push") {
+              // Ordinary sync never deletes remote data based only on absence on
+              // this device. Save remote-only changes locally and preserve their
+              // manifest entry for a later review/reconciliation.
+              if (!base || await hashBlob(remoteBlob) !== await hashBlob(base)) {
+                await saveGitHubRecoveryCopy(path, base, undefined, remoteBlob, "Remote file is missing locally; kept the GitHub copy and saved it for recovery.");
               }
+              nextHashes[path] = previousHashes[path];
+              removed = true;
+              continue;
+            }
               try {
                 await assertRemoteLock();
                 if (remote.sha) await requestGitHubFile("DELETE", username, config, [rootPath, path].filter(Boolean).join("/"), { message: `Remove deleted Alleviate data: ${path}`, sha: remote.sha });
@@ -739,12 +842,14 @@ export default function AppSidebar({ active }: { active: AppSection }) {
             if (!removed) throw new Error(`Could not remove ${path} during hard push because GitHub kept changing it. Run Hard push again when no other sync is writing to this backup.`);
             if (!(path in nextHashes)) {
               delete nextHashes[path];
-              await saveGitHubCheckpoint(path);
+              checkpointUpdates.set(path, { path });
               reportGitHubProgress(`Removed stale backup file · ${path}`);
             }
           } catch (error) { if ((error as Error & { status?: number }).status !== 404) throw error; }
         }
-        deleted = Array.from(new Set([...(previousManifest?.deleted || []), ...pathsToRemove])).filter((path) => !(path in nextHashes)).sort();
+        deleted = action === "hard-push"
+          ? Array.from(new Set([...(previousManifest?.deleted || []), ...pathsToRemove])).filter((path) => !(path in nextHashes)).sort()
+          : Array.from(new Set(previousManifest?.deleted || [])).filter((path) => !(path in nextHashes)).sort();
         const hashesChanged = JSON.stringify(Object.entries(previousHashes).sort(([a], [b]) => a.localeCompare(b))) !== JSON.stringify(Object.entries(nextHashes).sort(([a], [b]) => a.localeCompare(b)));
         const deletedChanged = JSON.stringify([...(previousManifest?.deleted || [])].sort()) !== JSON.stringify([...deleted].sort());
         const manifestChanged = !previousManifest || hashesChanged || deletedChanged;
@@ -769,9 +874,15 @@ export default function AppSidebar({ active }: { active: AppSection }) {
             if (manifestFileSha) payload.sha = manifestFileSha;
             try {
               await assertRemoteLock();
-              await requestGitHubFile("PUT", username, config, manifestPath, payload);
-              const verified = (await requestGitHubManifest(username, config, manifestPath)).manifest;
-              if (verified.format !== "alleviate-github-backup" || verified.version !== 1) throw new Error("GitHub returned an invalid manifest after the write.");
+              const saved = await requestGitHubFile("PUT", username, config, manifestPath, payload) as { content?: { sha?: unknown } };
+              const verifiedRecord = await requestGitHubManifest(username, config, manifestPath);
+              const verified = verifiedRecord.manifest;
+              const exactManifest = verified.format === "alleviate-github-backup" && verified.version === 1
+                && JSON.stringify(Object.entries(verified.files || {}).sort(([a], [b]) => a.localeCompare(b))) === JSON.stringify(Object.entries(manifest.files).sort(([a], [b]) => a.localeCompare(b)))
+                && JSON.stringify([...(verified.deleted || [])].sort()) === JSON.stringify([...manifest.deleted || []].sort());
+              if (!exactManifest || (typeof saved?.content?.sha === "string" && verifiedRecord.sha !== saved.content.sha)) {
+                throw new Error("GitHub changed the backup manifest during publication. The sync will retry using the latest manifest.");
+              }
               pushed += 1;
               published = true;
             } catch (error) {
@@ -785,8 +896,20 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           }
           if (!published) throw new Error("Could not publish the latest sync manifest. Your local files remain saved and can be synced again.");
         }
+        for (const checkpoint of remoteMergeCheckpoints) {
+          if (!checkpointUpdates.has(checkpoint.path)) checkpointUpdates.set(checkpoint.path, checkpoint);
+        }
+        for (const path of remoteDeletionCheckpoints) {
+          if (!(path in nextHashes)) checkpointUpdates.set(path, { path, acknowledge: true });
+        }
+        for (const path of Object.keys(nextHashes)) {
+          if (checkpointUpdates.has(path)) continue;
+          const existing = await getGitHubCheckpoint(path);
+          if (existing) checkpointUpdates.set(path, { path, blob: existing, acknowledge: false });
+        }
+        await saveGitHubCheckpointBatch(Array.from(checkpointUpdates.values()));
         const pushSummary = `Uploaded ${fileUploaded} · Unchanged ${fileSkipped} · Removed ${deleted.length} · Auto-resolved ${autoResolvedCount}`;
-        setGitHubProgress((current) => current ? { ...current, status: "success", title: action === "hard-push" ? "GitHub Hard Push Complete" : "GitHub Push Complete", processed: current.total, uploaded: fileUploaded, skipped: fileSkipped, logs: [...current.logs, pushSummary].slice(-8) } : current);
+        setGitHubProgress((current) => current ? { ...current, status: "success", title: action === "hard-push" ? "GitHub Hard Push Complete" : "GitHub Sync Complete", processed: current.total, uploaded: fileUploaded, skipped: fileSkipped, logs: [...current.logs, pushSummary].slice(-8) } : current);
         if (!options.silent) await dialogs.alert({ title: action === "hard-push" ? "Hard push complete" : "GitHub sync complete", message: `Uploaded ${pushed} changed files${deleted.length ? ` and removed ${deleted.length} deleted files` : ""}. Automatically resolved ${autoResolvedCount} conflict(s); recovery copies were saved on this device. Unchanged files were skipped.` });
       }
       const syncedAt = Date.now();
@@ -802,7 +925,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
       const settingsError = /bad credentials|requires authentication|invalid.{0,20}(token|credential)|expired.{0,20}token|manifest|backup folder/i.test(message)
         || (error as Error & { status?: number }).status === 401;
       setGitHubError(message);
-      setGitHubProgress((current) => current ? { ...current, status: "error", title: action === "pull" ? "GitHub Pull Failed" : "GitHub Push Failed", logs: [...current.logs, message].slice(-8) } : current);
+      setGitHubProgress((current) => current ? { ...current, status: "error", title: action === "pull" ? "GitHub Restore Failed" : "GitHub Sync Failed", logs: [...current.logs, message].slice(-8) } : current);
       if (settingsError) setGitHubNeedsSettings(true);
       if (!options.silent) {
         if (settingsError) {
@@ -839,7 +962,13 @@ export default function AppSidebar({ active }: { active: AppSection }) {
         const lastSync = await getGitHubLastSyncAt();
         if (!active) return;
         setGitHubLastSyncAt(lastSync);
-        const delayUntilDue = lastSync ? lastSync + 24 * 60 * 60 * 1000 - Date.now() : 0;
+        if (!lastSync) {
+          // Require the user to review and start the first two-way sync manually.
+          // Background syncs begin only after a successful, recoverable initial sync.
+          schedule(24 * 60 * 60 * 1000);
+          return;
+        }
+        const delayUntilDue = lastSync + 24 * 60 * 60 * 1000 - Date.now();
         if (delayUntilDue > 0) { schedule(delayUntilDue); return; }
         if (document.visibilityState !== "visible" || !navigator.onLine || githubAutoSyncInFlightRef.current || githubActionInFlightRef.current) {
           schedule(60 * 1000);
@@ -926,21 +1055,34 @@ export default function AppSidebar({ active }: { active: AppSection }) {
     if (!result?.success) await dialogs.alert({ title: "Could not open folder", message: result?.error || "The backup folder could not be opened." });
   };
 
+  const downloadLastGitHubSafetyBackup = async () => {
+    setGitHubMenuOpen(false);
+    try {
+      const backup = await getGitHubSafetyBackup();
+      if (!backup) {
+        await dialogs.alert({ title: "No sync recovery snapshot yet", message: "A local recovery snapshot is saved automatically before the next GitHub sync." });
+        return;
+      }
+      downloadAppBackup(backup, `Alleviate-before-GitHub-sync-${new Date().toISOString().slice(0, 10)}.zip`);
+    } catch (error) {
+      await dialogs.alert({ title: "Could not download recovery snapshot", message: error instanceof Error ? error.message : "The saved local snapshot could not be read." });
+    }
+  };
+
   return <aside className="home-sidebar" aria-label="Main navigation">
     <nav className="home-sidebar-nav">{items.map(({ id, href, label, Icon }) => <Link key={id} className={`sidebar-link ${active === id ? "is-active" : ""}`} href={href} aria-label={label} title={label} aria-current={active === id ? "page" : undefined}><Icon size={19} /></Link>)}</nav>
     <div className="sidebar-bottom-actions">
       <div className="sidebar-settings-wrap" ref={githubMenuRef}>
-        <button type="button" className={`sidebar-link sidebar-settings-button ${githubMenuOpen ? "is-active" : ""}`} aria-label="GitHub sync" title="GitHub sync" aria-haspopup="menu" aria-expanded={githubMenuOpen} disabled={Boolean(githubBusy)} onClick={() => setGitHubMenuOpen((open) => !open)}>
-          <Github size={19} aria-hidden="true"/>
+        <button type="button" className={`sidebar-link sidebar-settings-button ${githubMenuOpen ? "is-active" : ""}`} aria-label="More sync options" title="More sync options" aria-haspopup="menu" aria-expanded={githubMenuOpen} disabled={Boolean(githubBusy)} onClick={() => setGitHubMenuOpen((open) => !open)}>
+          <MoreHorizontal size={19} aria-hidden="true"/>
         </button>
         {githubMenuOpen && <div className="sidebar-github-menu" role="menu" aria-label="GitHub sync actions">
           <div className="sidebar-settings-menu-title">GitHub sync</div>
-          <button type="button" role="menuitem" disabled={Boolean(githubBusy)} onClick={() => void runGitHubAction("pull")}><GitPullRequest size={15}/><span>Pull backup</span></button>
-          <button type="button" role="menuitem" disabled={Boolean(githubBusy)} onClick={() => void runGitHubAction("push")}><UploadCloud size={15}/><span>Push backup</span></button>
-          <button type="button" role="menuitem" disabled={Boolean(githubBusy)} onClick={() => void runGitHubAction("hard-push")}><Upload size={15}/><span>Hard push</span></button>
+          <button type="button" role="menuitem" disabled={Boolean(githubBusy) || !githubLinked} onClick={() => void runGitHubAction("push")}><RefreshCw size={15}/><span>Sync now · merge both sides</span></button>
+          <button type="button" role="menuitem" disabled={Boolean(githubBusy)} onClick={() => void downloadLastGitHubSafetyBackup()}><Download size={15}/><span>Download last recovery snapshot</span></button>
         </div>}
       </div>
-      {githubLinked && <button type="button" className={`sidebar-link sidebar-settings-button sidebar-sync-now ${githubBusy ? "is-active" : ""}`} aria-label={githubBusy ? "GitHub sync in progress" : "Sync GitHub now"} title={githubError ? `Sync issue: ${githubError}` : `Sync now · automatic every 24 hours${githubLastSyncAt ? ` · Last synced ${new Date(githubLastSyncAt).toLocaleString()}` : " · First sync is due"}`} disabled={Boolean(githubBusy)} onClick={() => void runGitHubAction("push", { silent: true })}>
+      {githubLinked && <button type="button" className={`sidebar-link sidebar-settings-button sidebar-sync-now ${githubBusy ? "is-active" : ""}`} aria-label={githubBusy ? "GitHub sync in progress" : "Sync with GitHub"} title={githubError ? `Sync issue: ${githubError}` : `Sync with GitHub · merges both sides${githubLastSyncAt ? ` · Last synced ${new Date(githubLastSyncAt).toLocaleString()}` : " · First sync is due"}`} disabled={Boolean(githubBusy)} onClick={() => void runGitHubAction("push", { silent: true })}>
         {githubBusy ? <LoaderCircle size={18} className="sidebar-backup-spinner" aria-hidden="true"/> : <RefreshCw size={18} aria-hidden="true"/>}
       </button>}
       <div className="sidebar-settings-wrap" ref={settingsRef}>
@@ -954,7 +1096,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           <button type="button" role="menuitem" onClick={() => { setSettingsOpen(false); setAutoBackupOpen(true); }}><Settings2 size={15} /><span>Automatic backup settings</span></button>
         </div>}
       </div>
-      {githubSyncReady && (!githubLinked || githubNeedsSettings) && <button type="button" className={`sidebar-link sidebar-settings-button ${githubNeedsSettings ? "github-settings-needs-attention" : ""}`} aria-label="GitHub settings" title={githubNeedsSettings ? "GitHub settings need attention · Open settings" : "GitHub settings"} onClick={() => void openGitHubSettings()}><Settings2 size={19}/></button>}
+      <button type="button" className={`sidebar-link sidebar-settings-button ${githubNeedsSettings ? "github-settings-needs-attention" : ""}`} aria-label="GitHub settings" title={githubNeedsSettings ? "GitHub settings need attention · Open settings" : "GitHub settings"} onClick={() => void openGitHubSettings()}><Settings2 size={19}/></button>
       <input ref={importInputRef} hidden type="file" accept=".zip,application/zip" onChange={(event) => void importBackup(event.target.files?.[0])} />
       <button type="button" className="sidebar-avatar" aria-label="Open profile" title="Profile" onClick={() => setProfileOpen(true)}>A</button>
     </div>
@@ -990,7 +1132,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
           <label className="github-settings-field"><span>Personal access token</span><input type="password" autoComplete="off" value={githubSettings.githubToken} onChange={(event) => setGitHubSettings((current) => ({ ...current, githubToken: event.target.value }))} placeholder="ghp_…"/></label>
           <div className="github-settings-grid"><label className="github-settings-field"><span>Repository owner</span><input value={githubSettings.githubOwner} onChange={(event) => setGitHubSettings((current) => ({ ...current, githubOwner: event.target.value }))} placeholder="your-username"/></label><label className="github-settings-field"><span>Repository name</span><input value={githubSettings.githubRepo} onChange={(event) => setGitHubSettings((current) => ({ ...current, githubRepo: event.target.value }))} placeholder="my-backups"/></label></div>
           <label className="github-settings-field"><span>Backup folder <small>(optional)</small></span><input value={githubSettings.githubPath} onChange={(event) => setGitHubSettings((current) => ({ ...current, githubPath: event.target.value }))} placeholder="AlleviateBackups"/></label>
-          <p className="github-settings-note">Alleviate stores a manifest and separate canvas, image, mind map, and app data files. Push uploads changed files only. Use a token with Contents read and write access.</p>
+          <p className="github-settings-note">Alleviate stores a manifest and separate canvas, image, mind map, and app data files. Sync merges changes from this device and GitHub, then uploads changed files. Use a token with Contents read and write access.</p>
           {githubConflicts.length > 0 && <section className="github-sync-conflicts" aria-label="Unresolved GitHub sync conflicts"><strong>{githubConflicts.length} sync conflict{githubConflicts.length === 1 ? "" : "s"} need review</strong>{githubConflicts.map((conflict) => <article key={conflict.path}><b title={conflict.path}>{conflict.path}</b><p>{conflict.message}</p><div><button type="button" onClick={() => void resolveGitHubConflict(conflict.path, "local")} disabled={!conflict.local}>Keep this device</button><button type="button" onClick={() => void resolveGitHubConflict(conflict.path, "remote")}>Use GitHub</button></div></article>)}</section>}
         </>}
         {githubError && <p className="github-settings-error" role="alert">{githubError}</p>}
@@ -998,7 +1140,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
       </form>
     </div>}
     {githubProgress && <section className={`github-sync-progress is-${githubProgress.status}`} role="status" aria-live="polite" aria-label="GitHub sync progress">
-      <header><div className="github-sync-progress-heading"><span className={`github-sync-progress-indicator ${githubProgress.status === "running" ? "is-spinning" : ""}`}>{githubProgress.status === "running" ? <LoaderCircle size={16}/> : githubProgress.status === "success" ? <Check size={16}/> : githubProgress.status === "cancelled" ? <X size={16}/> : <X size={16}/>}</span><div><strong>{githubProgress.title}</strong><small>{githubProgress.mode === "push" ? "GitHub push status" : "GitHub pull status"} · {githubProgress.status}</small></div></div><button type="button" aria-label="Close GitHub sync progress" onClick={() => setGitHubProgress(null)}><X size={16}/></button></header>
+      <header><div className="github-sync-progress-heading"><span className={`github-sync-progress-indicator ${githubProgress.status === "running" ? "is-spinning" : ""}`}>{githubProgress.status === "running" ? <LoaderCircle size={16}/> : githubProgress.status === "success" ? <Check size={16}/> : githubProgress.status === "cancelled" ? <X size={16}/> : <X size={16}/>}</span><div><strong>{githubProgress.title}</strong><small>{githubProgress.mode === "sync" ? "Two-way GitHub sync" : "GitHub pull status"} · {githubProgress.status}</small></div></div><button type="button" aria-label="Close GitHub sync progress" onClick={() => setGitHubProgress(null)}><X size={16}/></button></header>
       <div className="github-sync-progress-track"><span className={githubProgress.status === "running" && !githubProgress.total ? "is-indeterminate" : ""} style={{ width: githubProgress.total ? `${Math.min(100, Math.round(githubProgress.processed / githubProgress.total * 100))}%` : undefined }}/></div>
       <div className="github-sync-progress-counts"><span>{githubProgress.total ? `${Math.min(githubProgress.processed, githubProgress.total)} / ${githubProgress.total} checked` : githubProgress.status === "running" ? "Working…" : "Finished"}</span><span>{githubProgress.uploaded} pushed · {githubProgress.skipped} unchanged</span></div>
       <ul>{githubProgress.logs.slice(-6).map((entry, index) => <li key={`${index}-${entry}`}>{entry}</li>)}</ul>

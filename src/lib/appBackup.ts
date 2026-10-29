@@ -7,6 +7,7 @@ const BLOB_MARKER = "__alleviateBackupBlob";
 const DATABASES = [
   { name: "alleviate-books-v1", stores: [{ name: "pdf-files", keyPath: "id" }] },
   { name: "alleviate-canvas-files-v1", stores: [{ name: "files", keyPath: "key" }] },
+  { name: "alleviate-canvas-documents-v2", stores: [{ name: "documents", keyPath: "id" }] },
 ] as const;
 
 type DatabaseEntry = { name: string; stores: Array<{ name: string; recordsPath: string; recordCount: number }> };
@@ -193,7 +194,10 @@ export async function restoreAppBackup(backup: ImportedBackup): Promise<{ localS
     for (const database of DATABASES) {
       const storeRecords = backup.records.get(database.name);
       for (const store of database.stores) {
-        const rows = storeRecords?.get(store.name) ?? [];
+        // Older backup files predate some databases. Preserve those stores when
+        // restoring an older archive; a present, empty store still clears it.
+        if (!storeRecords?.has(store.name)) continue;
+        const rows = storeRecords.get(store.name) ?? [];
         await restoreStore(database.name, store.name, store.keyPath, rows);
         recordCount += rows.length;
       }
@@ -220,11 +224,11 @@ export async function restoreAppBackup(backup: ImportedBackup): Promise<{ localS
   }
 }
 
-export function downloadAppBackup(blob: Blob) {
+export function downloadAppBackup(blob: Blob, filename = `Alleviate-backup-${new Date().toISOString().slice(0, 10)}.zip`) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `Alleviate-backup-${new Date().toISOString().slice(0, 10)}.zip`;
+  link.download = filename;
   link.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
