@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Activity, ArrowDownUp, CalendarDays, Check, CheckSquare, Download, ExternalLink, FolderOpen, Grid2X2, Home, Hourglass, LoaderCircle, MoreHorizontal, Pencil, RefreshCw, Settings2, Upload, X } from "lucide-react";
+import { Activity, ArrowDownUp, CalendarDays, Check, CheckSquare, Download, ExternalLink, FolderOpen, Github, Grid2X2, Home, Hourglass, LoaderCircle, MoreHorizontal, Pencil, RefreshCw, Settings2, Upload, X } from "lucide-react";
 import { useAppDialogs } from "./AppDialogs";
 import { createAppBackup, downloadAppBackup, parseAppBackup, restoreAppBackup } from "../lib/appBackup";
 import { requestAppApi } from "../lib/desktopAuth";
@@ -1129,6 +1129,9 @@ export default function AppSidebar({ active }: { active: AppSection }) {
         <header><div><span className="auto-backup-kicker">REPOSITORY SYNC</span><h2 id="github-settings-title">GitHub settings</h2></div><button type="button" className="auto-backup-close" aria-label="Close GitHub settings" onClick={() => setGitHubSettingsOpen(false)}><X size={18}/></button></header>
         <p className="auto-backup-description">Connect a GitHub repository to store and restore Alleviate backups.</p>
         {githubSettingsBusy ? <p className="github-settings-loading">Loading GitHub settings…</p> : <>
+          <a className="auto-backup-primary" href="/api/github/connect" style={{ display: "inline-flex", textDecoration: "none", marginBottom: 16 }}>
+            <Github size={16} aria-hidden="true"/> Connect GitHub and create private backup repo
+          </a>
           <label className="github-settings-field"><span>Personal access token</span><input type="password" autoComplete="off" value={githubSettings.githubToken} onChange={(event) => setGitHubSettings((current) => ({ ...current, githubToken: event.target.value }))} placeholder="ghp_…"/></label>
           <div className="github-settings-grid"><label className="github-settings-field"><span>Repository owner</span><input value={githubSettings.githubOwner} onChange={(event) => setGitHubSettings((current) => ({ ...current, githubOwner: event.target.value }))} placeholder="your-username"/></label><label className="github-settings-field"><span>Repository name</span><input value={githubSettings.githubRepo} onChange={(event) => setGitHubSettings((current) => ({ ...current, githubRepo: event.target.value }))} placeholder="my-backups"/></label></div>
           <label className="github-settings-field"><span>Backup folder <small>(optional)</small></span><input value={githubSettings.githubPath} onChange={(event) => setGitHubSettings((current) => ({ ...current, githubPath: event.target.value }))} placeholder="AlleviateBackups"/></label>
