@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Activity, ArrowDownUp, CalendarDays, Check, CheckSquare, Download, ExternalLink, FolderOpen, Github, Grid2X2, Home, Hourglass, LoaderCircle, MoreHorizontal, Pencil, RefreshCw, Settings2, Upload, X } from "lucide-react";
+import { Activity, ArrowDownUp, CalendarDays, Check, CheckSquare, Download, ExternalLink, FolderOpen, Github, Grid2X2, Home, Hourglass, LoaderCircle, Pencil, RefreshCw, Settings2, Upload, X } from "lucide-react";
 import { useAppDialogs } from "./AppDialogs";
 import { createAppBackup, downloadAppBackup, parseAppBackup, restoreAppBackup } from "../lib/appBackup";
 import { requestAppApi } from "../lib/desktopAuth";
@@ -1072,16 +1072,6 @@ export default function AppSidebar({ active }: { active: AppSection }) {
   return <aside className="home-sidebar" aria-label="Main navigation">
     <nav className="home-sidebar-nav">{items.map(({ id, href, label, Icon }) => <Link key={id} className={`sidebar-link ${active === id ? "is-active" : ""}`} href={href} aria-label={label} title={label} aria-current={active === id ? "page" : undefined}><Icon size={19} /></Link>)}</nav>
     <div className="sidebar-bottom-actions">
-      <div className="sidebar-settings-wrap" ref={githubMenuRef}>
-        <button type="button" className={`sidebar-link sidebar-settings-button ${githubMenuOpen ? "is-active" : ""}`} aria-label="More sync options" title="More sync options" aria-haspopup="menu" aria-expanded={githubMenuOpen} disabled={Boolean(githubBusy)} onClick={() => setGitHubMenuOpen((open) => !open)}>
-          <MoreHorizontal size={19} aria-hidden="true"/>
-        </button>
-        {githubMenuOpen && <div className="sidebar-github-menu" role="menu" aria-label="GitHub sync actions">
-          <div className="sidebar-settings-menu-title">GitHub sync</div>
-          <button type="button" role="menuitem" disabled={Boolean(githubBusy) || !githubLinked} onClick={() => void runGitHubAction("push")}><RefreshCw size={15}/><span>Sync now · merge both sides</span></button>
-          <button type="button" role="menuitem" disabled={Boolean(githubBusy)} onClick={() => void downloadLastGitHubSafetyBackup()}><Download size={15}/><span>Download last recovery snapshot</span></button>
-        </div>}
-      </div>
       {githubLinked && <button type="button" className={`sidebar-link sidebar-settings-button sidebar-sync-now ${githubBusy ? "is-active" : ""}`} aria-label={githubBusy ? "GitHub sync in progress" : "Sync with GitHub"} title={githubError ? `Sync issue: ${githubError}` : `Sync with GitHub · merges both sides${githubLastSyncAt ? ` · Last synced ${new Date(githubLastSyncAt).toLocaleString()}` : " · First sync is due"}`} disabled={Boolean(githubBusy)} onClick={() => void runGitHubAction("push", { silent: true })}>
         {githubBusy ? <LoaderCircle size={18} className="sidebar-backup-spinner" aria-hidden="true"/> : <RefreshCw size={18} aria-hidden="true"/>}
       </button>}
@@ -1133,6 +1123,7 @@ export default function AppSidebar({ active }: { active: AppSection }) {
             <strong>GitHub connected</strong>
             <p>Repository: <a href={`https://github.com/${encodeURIComponent(githubSettings.githubOwner)}/${encodeURIComponent(githubSettings.githubRepo)}`} target="_blank" rel="noreferrer">{githubSettings.githubOwner}/{githubSettings.githubRepo}</a></p>
             <p>Backup folder: <code>{githubSettings.githubPath || "Repository root"}</code></p>
+            <button type="button" className="auto-backup-secondary" onClick={() => void downloadLastGitHubSafetyBackup()}><Download size={14}/> Download recovery snapshot</button>
           </section> : <>
             <a className="auto-backup-primary" href="/api/github/connect" style={{ display: "inline-flex", textDecoration: "none", marginBottom: 16 }}>
               <Github size={16} aria-hidden="true"/> Connect GitHub and create private backup repo
