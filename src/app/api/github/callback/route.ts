@@ -48,7 +48,7 @@ export async function GET(request: Request) {
       if (!create.ok) throw new Error(repo.message || "GitHub could not create the backup repository.");
     }
     if (!repo.owner?.login || !repo.name) throw new Error("GitHub returned incomplete repository details.");
-    await upsertGitHubSettings({ username: sessionUser, githubToken: token, githubOwner: repo.owner.login, githubRepo: repo.name, githubPath: "" });
+    await upsertGitHubSettings({ username: sessionUser, githubToken: token, githubOwner: repo.owner.login, githubRepo: repo.name, githubPath: "AlleviateBackup" });
     returnTo.searchParams.set("github", "connected");
   } catch (error) {
     console.error("GitHub OAuth callback failed:", error);

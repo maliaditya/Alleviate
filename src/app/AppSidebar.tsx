@@ -1125,21 +1125,24 @@ export default function AppSidebar({ active }: { active: AppSection }) {
       </section>
     </div>}
     {githubSettingsOpen && <div className="github-settings-overlay" onPointerDown={(event) => { if (event.target === event.currentTarget) setGitHubSettingsOpen(false); }}>
-      <form className="github-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="github-settings-title" onSubmit={(event) => void saveGitHubSettings(event)}>
+      <form className="github-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="github-settings-title" onSubmit={(event) => event.preventDefault()}>
         <header><div><span className="auto-backup-kicker">REPOSITORY SYNC</span><h2 id="github-settings-title">GitHub settings</h2></div><button type="button" className="auto-backup-close" aria-label="Close GitHub settings" onClick={() => setGitHubSettingsOpen(false)}><X size={18}/></button></header>
         <p className="auto-backup-description">Connect a GitHub repository to store and restore Alleviate backups.</p>
         {githubSettingsBusy ? <p className="github-settings-loading">Loading GitHub settings…</p> : <>
-          <a className="auto-backup-primary" href="/api/github/connect" style={{ display: "inline-flex", textDecoration: "none", marginBottom: 16 }}>
-            <Github size={16} aria-hidden="true"/> Connect GitHub and create private backup repo
-          </a>
-          <label className="github-settings-field"><span>Personal access token</span><input type="password" autoComplete="off" value={githubSettings.githubToken} onChange={(event) => setGitHubSettings((current) => ({ ...current, githubToken: event.target.value }))} placeholder="ghp_…"/></label>
-          <div className="github-settings-grid"><label className="github-settings-field"><span>Repository owner</span><input value={githubSettings.githubOwner} onChange={(event) => setGitHubSettings((current) => ({ ...current, githubOwner: event.target.value }))} placeholder="your-username"/></label><label className="github-settings-field"><span>Repository name</span><input value={githubSettings.githubRepo} onChange={(event) => setGitHubSettings((current) => ({ ...current, githubRepo: event.target.value }))} placeholder="my-backups"/></label></div>
-          <label className="github-settings-field"><span>Backup folder <small>(optional)</small></span><input value={githubSettings.githubPath} onChange={(event) => setGitHubSettings((current) => ({ ...current, githubPath: event.target.value }))} placeholder="AlleviateBackups"/></label>
-          <p className="github-settings-note">Alleviate stores a manifest and separate canvas, image, mind map, and app data files. Sync merges changes from this device and GitHub, then uploads changed files. Use a token with Contents read and write access.</p>
+          {githubSettings.githubToken && githubSettings.githubOwner && githubSettings.githubRepo ? <section className="github-settings-note" aria-label="Connected GitHub repository">
+            <strong>GitHub connected</strong>
+            <p>Repository: <a href={`https://github.com/${encodeURIComponent(githubSettings.githubOwner)}/${encodeURIComponent(githubSettings.githubRepo)}`} target="_blank" rel="noreferrer">{githubSettings.githubOwner}/{githubSettings.githubRepo}</a></p>
+            <p>Backup folder: <code>{githubSettings.githubPath || "Repository root"}</code></p>
+          </section> : <>
+            <a className="auto-backup-primary" href="/api/github/connect" style={{ display: "inline-flex", textDecoration: "none", marginBottom: 16 }}>
+              <Github size={16} aria-hidden="true"/> Connect GitHub and create private backup repo
+            </a>
+            <p className="github-settings-note">Alleviate will create a private backup repository in your GitHub account and sync your data there.</p>
+          </>}
           {githubConflicts.length > 0 && <section className="github-sync-conflicts" aria-label="Unresolved GitHub sync conflicts"><strong>{githubConflicts.length} sync conflict{githubConflicts.length === 1 ? "" : "s"} need review</strong>{githubConflicts.map((conflict) => <article key={conflict.path}><b title={conflict.path}>{conflict.path}</b><p>{conflict.message}</p><div><button type="button" onClick={() => void resolveGitHubConflict(conflict.path, "local")} disabled={!conflict.local}>Keep this device</button><button type="button" onClick={() => void resolveGitHubConflict(conflict.path, "remote")}>Use GitHub</button></div></article>)}</section>}
         </>}
         {githubError && <p className="github-settings-error" role="alert">{githubError}</p>}
-        <footer><button type="button" className="countdown-cancel" onClick={() => setGitHubSettingsOpen(false)}>Cancel</button><button type="submit" className="auto-backup-primary" disabled={githubSettingsBusy}>{githubSettingsBusy ? "Loading…" : "Save settings"}</button></footer>
+        <footer><button type="button" className="auto-backup-primary" onClick={() => setGitHubSettingsOpen(false)}>Done</button></footer>
       </form>
     </div>}
     {githubProgress && <section className={`github-sync-progress is-${githubProgress.status}`} role="status" aria-live="polite" aria-label="GitHub sync progress">
