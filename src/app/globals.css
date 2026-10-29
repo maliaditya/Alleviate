@@ -65,13 +65,11 @@ button, input { font: inherit; }
 .resource-map-hover-actions { display: grid; gap: 9px; padding-top: 10px; }
 .resource-map-nodes .resource-map-task-progress line { stroke: #ffffff55; stroke-width: 1px; }
 .resource-map-nodes .resource-map-task-progress text { fill: #eee8ff; font-size: 8px; font-weight: 700; text-anchor: middle; pointer-events: none; }
-.matrix-main { overflow: hidden; }
-.matrix-main > .home-topbar { display: none; }
+.matrix-page { width: 100%; height: 100vh; height: 100dvh; min-height: 0; overflow: hidden; background: #1b1b1b; }
+.matrix-main { width: 100%; height: 100%; overflow: hidden; }
 .mindmap-library-bar > .mindmap-brand { display: none; }
-.matrix-content { width: 100%; max-width: none; min-height: 0; margin: 0; padding: 20px 22px 16px; flex: 1; display: flex; flex-direction: column; gap: 15px; }
-.matrix-heading { display: flex; justify-content: space-between; align-items: end; gap: 24px; }
-.matrix-heading .home-overview-kicker, .matrix-heading p { display: none; }
-.matrix-heading h1 { margin: 0; font-size: clamp(21px, 2vw, 27px); letter-spacing: -.035em; }
+.matrix-content { width: 100%; height: 100%; max-width: none; min-height: 0; margin: 0; padding: 12px 14px; }
+.matrix-heading { display: none; }
 .matrix-heading-stats { display: flex; align-items: center; gap: 8px; }
 .matrix-heading-stats > span, .matrix-heading-stats > a { min-height: 36px; padding: 0 12px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid #ffffff18; border-radius: 10px; color: #adb6c4; background: #ffffff05; font-size: 12px; text-decoration: none; white-space: nowrap; }
 .matrix-heading-stats > span b { color: #f5f6fa; }
@@ -109,9 +107,9 @@ button, input { font: inherit; }
 .matrix-task:hover .matrix-task-delete, .matrix-task-delete:focus-visible { opacity: 1; }
 .matrix-task-delete:hover { color: #ff7c86; background: #fb596b14; }
 .matrix-empty { margin: 16px 0 8px; color: #697384; font-size: 12px; text-align: center; }
-.matrix-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #788293; font-size: 11px; }
+.matrix-footer { display: none; }
 .matrix-footer button { padding: 6px 9px; border: 1px solid #ffffff16; border-radius: 7px; color: #b5bdca; background: #ffffff05; font-size: 11px; cursor: pointer; }
-@media (max-width: 760px) { .matrix-content { overflow-y: auto; padding: 16px 12px 14px; gap: 12px; } .matrix-heading { align-items: flex-start; flex-direction: row; gap: 14px; } .matrix-heading h1 { font-size: 21px; } .matrix-heading-stats { flex-wrap: wrap; } .matrix-grid { grid-template-columns: 1fr; grid-template-rows: auto; flex: none; } .matrix-quadrant { min-height: 220px; } .matrix-task-delete { opacity: 1; } }
+@media (max-width: 760px) { .matrix-content { overflow-y: auto; padding: 12px; } .matrix-grid { grid-template-columns: 1fr; grid-template-rows: auto; flex: none; } .matrix-quadrant { min-height: 220px; } .matrix-task-delete { opacity: 1; } }
 .tasks-main { overflow: auto; }
 .tasks-shell { min-width: 0; height: 100%; min-height: 0; display: grid; grid-template-columns: 244px minmax(360px, 1fr) minmax(280px, 34%); overflow: hidden; background: #191919; }
 .tasks-nav { min-height: 0; padding: 26px 10px; display: flex; flex-direction: column; border-right: 1px solid #ffffff0d; background: #1c1c1c; }
@@ -2211,7 +2209,6 @@ body,
   .calendar-days { min-width: 420px; }
   .calendar-month-header { position: sticky; top: 0; z-index: 5; }
   .matrix-content { overflow-y: auto; }
-  .matrix-heading { flex-wrap: wrap; }
   .task-list-page .tasks-nav { max-width: 100%; }
   .needs-tracker-shell .tasks-center { padding: 12px; }
   .tracker-summary { grid-template-columns: 52px minmax(0, 1fr) 44px; gap: 8px; padding: 9px; }

@@ -7,18 +7,23 @@ const targetBase = path.join(projectRoot, "public", "vendor", "excalidraw", "dis
 
 for (const directory of ["excalidraw-assets", "excalidraw-assets-dev"]) {
   const source = path.join(sourceBase, directory);
-  // Excalidraw's webpack public path points at /vendor/excalidraw/, so
-  // development chunks are requested directly from that root. Its font and
-  // image helpers separately append /dist/excalidraw-assets/.
-  const target = directory === "excalidraw-assets-dev"
-    ? path.join(projectRoot, "public", "vendor", "excalidraw", directory)
-    : path.join(targetBase, directory);
+  // Webpack requests fonts from /vendor/excalidraw/excalidraw-assets/, while
+  // Excalidraw's image helpers append /dist/excalidraw-assets/ to the asset
+  // base. Keep the assets at both locations for those different URL builders.
+  const targets = directory === "excalidraw-assets-dev"
+    ? [path.join(projectRoot, "public", "vendor", "excalidraw", directory)]
+    : [
+        path.join(projectRoot, "public", "vendor", "excalidraw", directory),
+        path.join(targetBase, directory),
+      ];
   if (!fs.existsSync(source)) {
     throw new Error(`Missing Excalidraw assets: ${source}`);
   }
-  fs.rmSync(target, { recursive: true, force: true });
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.cpSync(source, target, { recursive: true });
+  for (const target of targets) {
+    fs.rmSync(target, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.cpSync(source, target, { recursive: true });
+  }
 }
 
 const pdfWorkerSource = path.join(projectRoot, "node_modules", "pdfjs-dist", "build", "pdf.worker.min.mjs");

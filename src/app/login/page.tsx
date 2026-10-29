@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useEffect } from 'react';
 import { ArrowLeft, Sparkles } from 'lucide-react';
 import { requestAuthJson, storeDesktopAuthTokens } from '@/lib/desktopAuth';
+import { switchWorkspaceAccount } from '@/lib/workspaceIsolation';
 
 function LoginContent() {
   const router = useRouter();
@@ -28,7 +29,9 @@ function LoginContent() {
     try {
       const { ok, data } = await requestAuthJson(`/api/auth/${mode === 'login' ? 'login' : 'register'}`, mode === 'login' ? { username, password } : { username, email, password });
       if (!ok) throw new Error(data?.error || 'Unable to sign in.');
-      await storeDesktopAuthTokens(data?.user?.username || username.trim().toLowerCase(), data || {});
+      const signedInUsername = data?.user?.username || username.trim().toLowerCase();
+      await switchWorkspaceAccount(signedInUsername);
+      await storeDesktopAuthTokens(signedInUsername, data || {});
       localStorage.setItem('alleviate_current_user', JSON.stringify(data?.user || { username: username.trim().toLowerCase(), email }));
       window.dispatchEvent(new Event('alleviate:auth-change'));
       setNotice(mode === 'register' ? 'Account created. You’re signed in.' : 'Welcome back.');

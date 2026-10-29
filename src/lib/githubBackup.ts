@@ -50,6 +50,20 @@ const fromPathId = (value: string) => {
   const binary = atob(base64 + "=".repeat((4 - base64.length % 4) % 4));
   return new TextDecoder().decode(Uint8Array.from(binary, (character) => character.charCodeAt(0)));
 };
+export async function isValidCanvasBackupRecord(path: string, blob: Blob | undefined): Promise<boolean> {
+  if (!blob) return false;
+  const parts = path.split("/");
+  if (parts.length !== 3 || parts[0] !== "canvases" || parts[2] !== "canvas.json") return false;
+  try {
+    const value = JSON.parse(await blob.text());
+    return Boolean(
+      value && typeof value === "object" &&
+      typeof value.id === "string" && value.id.trim() &&
+      Array.isArray(value.elements) &&
+      fromPathId(parts[1]) === value.id,
+    );
+  } catch { return false; }
+}
 function storageKeyFromBackupPath(path: string) {
   const parts = path.split("/");
   if (parts[0] === "app-data" && parts[1]?.endsWith(".json")) return fromPathId(parts[1].slice(0, -5));
@@ -303,7 +317,19 @@ function mergeJson(base: any, local: any, remote: any, location: string, conflic
 }
 
 export async function mergeGitHubFile(path: string, base: Blob | undefined, local: Blob | undefined, remote: Blob | undefined, prefer: "local" | "remote" = "local"): Promise<GitHubMergeResult> {
+  const isCanvasRecord = path.startsWith("canvases/") && path.endsWith("/canvas.json");
   const isMindMapRecord = path.startsWith("mind-maps/maps/") && path.endsWith(".json");
+  if (isCanvasRecord) {
+    const [localValid, remoteValid] = await Promise.all([
+      isValidCanvasBackupRecord(path, local),
+      isValidCanvasBackupRecord(path, remote),
+    ]);
+    if (local && localValid && remote && !remoteValid) return { blob: local, conflict: true, reason: "The GitHub canvas record was invalid; kept the intact local canvas." };
+    if (remote && remoteValid && local && !localValid) return { blob: remote, conflict: true, reason: "The local canvas record was invalid; kept the intact GitHub canvas." };
+    if (local && !localValid && remote && !remoteValid) {
+      return { blob: prefer === "local" ? local : remote, conflict: true, reason: "Both copies of this canvas are invalid; kept the selected copy for recovery." };
+    }
+  }
   if (isMindMapRecord) {
     const [localValid, remoteValid] = await Promise.all([isValidMindMapBackupRecord(local), isValidMindMapBackupRecord(remote)]);
     if (localValid && !remoteValid) return { blob: local, conflict: true, reason: "The GitHub mind map record was invalid; kept the intact local map." };
@@ -337,6 +363,14 @@ export async function mergeGitHubFile(path: string, base: Blob | undefined, loca
       if (remoteHash === baseHash) return { blob: local, conflict: false };
     }
     return { blob: prefer === "local" ? local : remote, conflict: true, reason: "Both devices changed this mind map; kept the selected complete map record." };
+  }
+  if (isCanvasRecord) {
+    if (base) {
+      const baseHash = await hashBlob(base);
+      if (localHash === baseHash) return { blob: remote, conflict: false };
+      if (remoteHash === baseHash) return { blob: local, conflict: false };
+    }
+    return { blob: prefer === "local" ? local : remote, conflict: true, reason: "Both devices changed this canvas; kept the selected complete canvas document." };
   }
   if (!base) {
     const indexField = path === "canvases/index.json" ? "canvasIds" : path === "mind-maps/state-index.json" ? "keys" : "";
@@ -484,7 +518,7 @@ async function applyAlleviateGitHubChangesUnchecked(downloads: Array<{ path: str
       }
       if (isStorageEntry) { storageKeyFromBackupPath(item.path); continue; }
       if (!parsed || typeof parsed !== "object") throw new Error(`GitHub sync stopped: ${item.path} has an invalid data shape. Local data was left unchanged.`);
-      if (item.path.startsWith("canvases/") && item.path.endsWith("/canvas.json") && (typeof parsed.id !== "string" || !Array.isArray(parsed.elements))) throw new Error(`GitHub sync stopped: ${item.path} is not a valid canvas document.`);
+      if (item.path.startsWith("canvases/") && item.path.endsWith("/canvas.json") && !await isValidCanvasBackupRecord(item.path, item.blob)) throw new Error(`GitHub sync stopped: ${item.path} is not a valid canvas document (its ID must match its path and it must contain an elements array).`);
       if (item.path.startsWith("mind-maps/maps/") && item.path.endsWith(".json")) {
         const id = parsed.map?.id;
         const xml = parsed.xml;

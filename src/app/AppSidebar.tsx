@@ -6,7 +6,7 @@ import { Activity, ArrowDownUp, CalendarDays, Check, CheckSquare, Download, Exte
 import { useAppDialogs } from "./AppDialogs";
 import { createAppBackup, downloadAppBackup, parseAppBackup, restoreAppBackup } from "../lib/appBackup";
 import { requestAppApi } from "../lib/desktopAuth";
-import { applyAlleviateGitHubChanges, clearGitHubConflict, collectAlleviateGitHubFiles, decodeBase64Blob, encodeBlobBase64, getGitHubCheckpoint, getGitHubLastSyncAt, getGitHubSafetyBackup, hashBlob, isSensitiveGitHubBackupPath, isValidMindMapBackupRecord, listGitHubConflicts, mergeGitHubFile, saveGitHubCheckpoint, saveGitHubCheckpointBatch, saveGitHubLastSyncAt, saveGitHubRecoveryCopy, saveGitHubSafetyBackup, setGitHubSyncScope, stageGitHubOutbox, type GitHubBackupManifest } from "../lib/githubBackup";
+import { applyAlleviateGitHubChanges, clearGitHubConflict, collectAlleviateGitHubFiles, decodeBase64Blob, encodeBlobBase64, getGitHubCheckpoint, getGitHubLastSyncAt, getGitHubSafetyBackup, hashBlob, isSensitiveGitHubBackupPath, isValidCanvasBackupRecord, isValidMindMapBackupRecord, listGitHubConflicts, mergeGitHubFile, saveGitHubCheckpoint, saveGitHubCheckpointBatch, saveGitHubLastSyncAt, saveGitHubRecoveryCopy, saveGitHubSafetyBackup, setGitHubSyncScope, stageGitHubOutbox, type GitHubBackupManifest } from "../lib/githubBackup";
 
 type AppSection = "home" | "canvas" | "books" | "mind-map" | "feedback-loop" | "countdown" | "calendar" | "eisenhower" | "tasks" | "tracking" | "support";
 type AutoBackupSettings = { directoryPath: string; lastRunWeek: string; lastRunAt: string; lastFilePath: string };
@@ -685,6 +685,11 @@ export default function AppSidebar({ active }: { active: AppSection }) {
             const remote = await requestGitHubBlobAtHash(username, config, [rootPath, path].filter(Boolean).join("/"), remoteHash);
             const base = await getGitHubCheckpoint(path);
             if (!base) {
+              if (path.startsWith("canvases/") && path.endsWith("/canvas.json") && !await isValidCanvasBackupRecord(path, remote)) {
+                await saveGitHubRecoveryCopy(path, base, undefined, remote, "The GitHub canvas record has an invalid document ID or elements array; kept it on GitHub and skipped downloading it.");
+                reportGitHubProgress(`Skipped invalid remote canvas; kept local data · ${path}`);
+                continue;
+              }
               if (path.startsWith("mind-maps/maps/") && path.endsWith(".json") && !await isValidMindMapBackupRecord(remote)) {
                 reportGitHubProgress(`Skipped invalid remote mind map; kept local data · ${path}`);
                 continue;

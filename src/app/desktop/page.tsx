@@ -1,8 +1,9 @@
 "use client";
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Check, Download, LoaderCircle, ShieldCheck } from 'lucide-react';
+import { requestAppApi } from '@/lib/desktopAuth';
 
 type PlanId = 'yearly' | 'lifetime';
 type CheckoutData = { keyId: string; orderId: string; amount: number; currency: string; name: string; description: string; prefill?: Record<string, string> };
@@ -44,6 +45,18 @@ export default function DesktopPlansPage() {
   const [busyPlan, setBusyPlan] = useState<PlanId | null>(null);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  const automaticDownloadStarted = useRef(false);
+
+  const startDownload = () => {
+    if (automaticDownloadStarted.current) return;
+    automaticDownloadStarted.current = true;
+    const link = document.createElement('a');
+    link.href = downloadUrl;
+    link.rel = 'noreferrer';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  };
 
   useEffect(() => {
     const requestedPlan = new URLSearchParams(window.location.search).get('plan');
@@ -52,10 +65,15 @@ export default function DesktopPlansPage() {
       const user = JSON.parse(localStorage.getItem('alleviate_current_user') || 'null');
       const name = String(user?.username || '').trim();
       setUsername(name);
-      if (name) void fetch('/api/desktop-access', { credentials: 'include', cache: 'no-store' }).then(async (response) => {
+      if (name) void requestAppApi('/api/desktop-access', { credentials: 'include', cache: 'no-store' }, name).then(async (response) => {
         if (!response.ok) return;
         const data = await response.json();
-        setAccess({ active: Boolean(data.active), planId: data.planId || null, expiresAt: data.expiresAt || null });
+        const active = Boolean(data.active);
+        setAccess({ active, planId: data.planId || null, expiresAt: data.expiresAt || null });
+        if (active && !automaticDownloadStarted.current) {
+          setMessage('Your desktop access is active. The installer download is starting.');
+          startDownload();
+        }
       }).catch(() => undefined);
     } catch { setUsername(''); }
   }, []);
@@ -66,9 +84,9 @@ export default function DesktopPlansPage() {
     if (!username) { window.location.assign(signInHref(planId)); return; }
     setBusyPlan(planId); setError(''); setMessage('');
     try {
-      const response = await fetch('/api/desktop-purchase/start', {
+      const response = await requestAppApi('/api/desktop-purchase/start', {
         method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ planId }),
-      });
+      }, username);
       const start = await response.json().catch(() => ({})) as { error?: string; checkoutData?: CheckoutData };
       if (!response.ok || !start.checkoutData?.orderId || !start.checkoutData.keyId) throw new Error(start.error || 'Could not start checkout.');
       if (!(await loadRazorpay()) || !window.Razorpay) throw new Error('Could not load Razorpay Checkout. Please try again.');
@@ -85,14 +103,15 @@ export default function DesktopPlansPage() {
           modal: { ondismiss: () => reject(new Error('Checkout was cancelled.')) },
           handler: async (payment) => {
             try {
-              const confirmResponse = await fetch('/api/desktop-purchase/confirm', {
+              const confirmResponse = await requestAppApi('/api/desktop-purchase/confirm', {
                 method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ orderId: payment.razorpay_order_id, paymentId: payment.razorpay_payment_id, signature: payment.razorpay_signature }),
-              });
+              }, username);
               const confirmed = await confirmResponse.json().catch(() => ({})) as { success?: boolean; error?: string; expiresAt?: string | null };
               if (!confirmResponse.ok || !confirmed.success) throw new Error(confirmed.error || 'Payment confirmation failed.');
               setAccess({ active: true, planId, expiresAt: confirmed.expiresAt || null });
               setMessage(planId === 'lifetime' ? 'Lifetime desktop access is now active.' : 'Yearly desktop access is now active.');
+              startDownload();
               resolve();
             } catch (cause) { reject(cause); }
           },

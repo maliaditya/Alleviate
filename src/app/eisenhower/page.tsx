@@ -2,8 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState, type DragEvent } from "react";
-import { ArrowUpRight, CalendarDays, Check, ChevronDown, Sparkles, Trash2 } from "lucide-react";
-import AppSidebar from "../AppSidebar";
+import { CalendarDays, ChevronDown, Trash2 } from "lucide-react";
 
 const STORAGE_KEY = "alleviate-eisenhower-tasks-v1";
 const CALENDAR_KEY = "alleviate-calendar-events-v1";
@@ -55,7 +54,6 @@ export default function EisenhowerPage() {
   const [ready, setReady] = useState(false);
   const [expanded, setExpanded] = useState<Record<QuadrantId, boolean>>({ do: true, schedule: true, delegate: true, eliminate: true });
   const [draggedId, setDraggedId] = useState<string | null>(null);
-  const [showCompleted, setShowCompleted] = useState(false);
 
   useEffect(() => { setTasks(readTasks()); setScheduledQuadrants(readScheduledQuadrants()); setReady(true); }, []);
   useEffect(() => {
@@ -109,21 +107,12 @@ export default function EisenhowerPage() {
   const today = dateKey(new Date());
   const scheduledToday = calendarTasks.filter((task) => occursToday(task, today)).map((task): MatrixTask => ({ id: `calendar:${task.id}`, title: task.title, quadrant: scheduledQuadrants[task.id] ?? "eliminate", done: task.completedDates?.includes(today) || false, createdAt: 0 }));
   const allTasks = [...tasks, ...scheduledToday];
-  const activeCount = allTasks.filter((task) => !task.done).length;
-  const completedCount = allTasks.length - activeCount;
-
-  return <main className="home-page">
-    <AppSidebar active="eisenhower" />
-    <div className="home-main matrix-main">
-      <header className="home-topbar"><Link className="home-brand" href="/" aria-label="Alleviate home"><span className="brand-mark"><Sparkles size={16} /></span><span>Alleviate</span></Link></header>
+  return <main className="matrix-page">
+    <div className="matrix-main">
       <section className="matrix-content">
-        <header className="matrix-heading">
-          <div><span className="home-overview-kicker">PLAN WITH CLARITY</span><h1>Eisenhower Matrix</h1><p>Decide what needs attention now, what deserves a plan, and what can wait.</p></div>
-          <div className="matrix-heading-stats"><span><b>{activeCount}</b> active</span><span><Check size={14} /> {completedCount} done</span><Link href="/calendar">Open calendar <ArrowUpRight size={14} /></Link></div>
-        </header>
         <div className="matrix-grid">
           {QUADRANTS.map((quadrant) => {
-            const quadrantTasks = allTasks.filter((task) => task.quadrant === quadrant.id && (showCompleted || !task.done)).sort((a, b) => Number(a.done) - Number(b.done) || (quadrant.id === "eliminate" ? Number(b.id.startsWith("calendar:")) - Number(a.id.startsWith("calendar:")) : 0) || b.createdAt - a.createdAt);
+            const quadrantTasks = allTasks.filter((task) => task.quadrant === quadrant.id).sort((a, b) => Number(a.done) - Number(b.done) || (quadrant.id === "eliminate" ? Number(b.id.startsWith("calendar:")) - Number(a.id.startsWith("calendar:")) : 0) || b.createdAt - a.createdAt);
             const count = allTasks.filter((task) => task.quadrant === quadrant.id).length;
             const isTodayScheduleQuadrant = quadrant.id === "eliminate";
             const isExpanded = expanded[quadrant.id];
@@ -142,7 +131,6 @@ export default function EisenhowerPage() {
             </section>;
           })}
         </div>
-        <footer className="matrix-footer"><span>Drag tasks between quadrants to reprioritize.</span><button type="button" onClick={() => setShowCompleted((shown) => !shown)}>{showCompleted ? "Hide completed" : `Show completed${completedCount ? ` (${completedCount})` : ""}`}</button></footer>
       </section>
     </div>
   </main>;

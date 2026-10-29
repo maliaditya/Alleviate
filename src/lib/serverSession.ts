@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 import { NextResponse } from 'next/server';
+import { verifyAccessToken } from '@/lib/authTokens';
 
 export const SESSION_COOKIE_NAME = 'lifeos_session';
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30; // 30 days
@@ -60,6 +61,13 @@ const parseCookieHeader = (cookieHeader: string) => {
 };
 
 export const getSessionUserFromRequest = (request: Request): string | null => {
+  const authorization = request.headers.get('authorization') || '';
+  const bearerMatch = authorization.match(/^Bearer\s+(.+)$/i);
+  if (bearerMatch) {
+    const accessToken = verifyAccessToken(bearerMatch[1].trim());
+    if (accessToken?.sub) return normalizeUsername(accessToken.sub);
+  }
+
   const cookieHeader = request.headers.get('cookie') || '';
   const cookieValues = parseCookieHeader(cookieHeader);
   if (!cookieValues.length) return null;

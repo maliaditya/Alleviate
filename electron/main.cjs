@@ -113,6 +113,9 @@ function registerDesktopAuthIpc() {
         "/api/auth/logout": ["POST"],
         "/api/github-settings": ["GET", "POST"],
         "/api/github-contents": ["GET", "PUT", "DELETE"],
+        "/api/desktop-access": ["GET"],
+        "/api/desktop-purchase/start": ["POST"],
+        "/api/desktop-purchase/confirm": ["POST"],
       };
       const allowedMethods = routeMethods[target.pathname];
       if (!allowedMethods) return { success: false, error: "App API route is not allowed." };
