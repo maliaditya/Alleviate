@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState, type DragEvent } from "react";
-import { CalendarDays, ChevronDown, Trash2 } from "lucide-react";
+import { CalendarDays, Check, ChevronDown, Trash2 } from "lucide-react";
 
 const STORAGE_KEY = "alleviate-eisenhower-tasks-v1";
 const CALENDAR_KEY = "alleviate-calendar-events-v1";
