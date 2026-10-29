@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
-import { Activity, Apple, Baby, Banknote, BedDouble, Bike, BookOpen, Brain, Briefcase, BriefcaseBusiness, Building, Building2, Bus, Camera, Car, ChartNoAxesCombined, Check, ChevronDown, ChevronUp, Circle, CreditCard, Dumbbell, Flower2, Footprints, Gamepad2, GraduationCap, HandHeart, Heart, HeartHandshake, House, KeyRound, Laptop, Languages, Lightbulb, Maximize2, Minus, Mountain, MousePointer2, Music, NotebookPen, Palette, PiggyBank, Plane, Plus, Presentation, Receipt, Settings2, Sofa, Target, TrainFront, Trees, TrendingUp, Utensils, UserRound, Users, Wallet, Ticket, type LucideIcon } from "lucide-react";
+import { Activity, Apple, AtSign, Baby, Banknote, BedDouble, Bike, BookOpen, Brain, Briefcase, BriefcaseBusiness, Building, Building2, Bus, Camera, Car, ChartNoAxesCombined, Check, ChevronDown, ChevronUp, Circle, CreditCard, Dumbbell, Flower2, Footprints, Gamepad2, GraduationCap, HandHeart, Heart, HeartHandshake, House, KeyRound, Laptop, Languages, Lightbulb, Maximize2, MessageCircle, Minus, Mountain, MousePointer2, Music, NotebookPen, Palette, PiggyBank, Plane, Plus, Presentation, Radio, Receipt, Settings2, Share2, Sofa, Target, TrainFront, Trees, TrendingUp, Utensils, UserRound, Users, Video, Wallet, Ticket, Youtube, type LucideIcon } from "lucide-react";
 import { syncAllFeedbackActionTitles } from "./lib/feedbackActionSync";
 
 const RESOURCES_MAP_ID = "alleviate-resources-default";
@@ -25,15 +25,39 @@ const OBJECT_ICONS: Record<string, LucideIcon> = {
   land: Mountain,
   bike: Bike,
   car: Car,
+  mom: Heart,
+  mother: Heart,
+  dad: Heart,
+  father: Heart,
+  sister: UserRound,
+  sisters: Users,
+  brother: UserRound,
+  brothers: Users,
+  family: Users,
+  friend: UserRound,
+  friends: Users,
+  buddy: HeartHandshake,
+  employer: BriefcaseBusiness,
+  client: BriefcaseBusiness,
+  clients: BriefcaseBusiness,
+  customer: UserRound,
+  customers: Users,
+  instagram: Camera,
+  youtube: Laptop,
+  tiktok: Camera,
+  linkedin: BriefcaseBusiness,
+  facebook: Users,
+  whatsapp: HeartHandshake,
 };
-const DEFAULT_OBJECT_ICON_IDS: Record<string, string> = { body: "dumbbell", mind: "brain", job: "briefcase", freelancing: "laptop", heart: "heart", house: "house", land: "mountain", bike: "bike", car: "car" };
-const ICON_CATEGORIES = ["Wellbeing", "Work", "Relationships", "Home", "Money", "Transport", "Growth", "Leisure"] as const;
+const DEFAULT_OBJECT_ICON_IDS: Record<string, string> = { body: "dumbbell", mind: "brain", job: "briefcase", freelancing: "laptop", heart: "heart", house: "house", land: "mountain", bike: "bike", car: "car", mom: "heart", mother: "heart", dad: "heart", father: "heart", sister: "user-round", sisters: "users", brother: "user-round", brothers: "users", family: "users", friend: "user-round", friends: "users", buddy: "heart-handshake", employer: "briefcase-business", client: "briefcase-business", clients: "briefcase-business", customer: "user-round", customers: "users", instagram: "camera", youtube: "laptop", tiktok: "camera", linkedin: "briefcase-business", facebook: "users", whatsapp: "heart-handshake" };
+const ICON_CATEGORIES = ["Wellbeing", "Work", "Relationships", "Social", "Home", "Money", "Transport", "Growth", "Leisure"] as const;
 type IconCategory = typeof ICON_CATEGORIES[number];
 const ICON_CATEGORY_BY_OBJECT: Record<string, IconCategory> = { body: "Wellbeing", mind: "Wellbeing", job: "Work", freelancing: "Work", heart: "Relationships", house: "Home", land: "Home", bike: "Transport", car: "Transport" };
 const OBJECT_ICON_OPTIONS: Array<{ id: string; label: string; category: IconCategory; Icon: LucideIcon }> = [
   { id: "dumbbell", label: "Fitness", category: "Wellbeing", Icon: Dumbbell }, { id: "activity", label: "Activity", category: "Wellbeing", Icon: Activity }, { id: "brain", label: "Mind", category: "Wellbeing", Icon: Brain }, { id: "bed-double", label: "Sleep", category: "Wellbeing", Icon: BedDouble }, { id: "apple", label: "Nutrition", category: "Wellbeing", Icon: Apple }, { id: "utensils", label: "Meals", category: "Wellbeing", Icon: Utensils }, { id: "circle", label: "Generic", category: "Wellbeing", Icon: Circle },
   { id: "briefcase", label: "Career", category: "Work", Icon: Briefcase }, { id: "laptop", label: "Freelance", category: "Work", Icon: Laptop }, { id: "building2", label: "Office", category: "Work", Icon: Building2 }, { id: "briefcase-business", label: "Business", category: "Work", Icon: BriefcaseBusiness }, { id: "presentation", label: "Present", category: "Work", Icon: Presentation }, { id: "chart", label: "Projects", category: "Work", Icon: ChartNoAxesCombined }, { id: "circle", label: "Generic", category: "Work", Icon: Circle },
-  { id: "heart", label: "Love", category: "Relationships", Icon: Heart }, { id: "users", label: "Family", category: "Relationships", Icon: Users }, { id: "heart-handshake", label: "Connection", category: "Relationships", Icon: HeartHandshake }, { id: "user-round", label: "Friend", category: "Relationships", Icon: UserRound }, { id: "baby", label: "Children", category: "Relationships", Icon: Baby }, { id: "hand-heart", label: "Care", category: "Relationships", Icon: HandHeart }, { id: "circle", label: "Generic", category: "Relationships", Icon: Circle },
+  { id: "heart", label: "Parent or partner", category: "Relationships", Icon: Heart }, { id: "users", label: "Family or siblings", category: "Relationships", Icon: Users }, { id: "heart-handshake", label: "Close connection", category: "Relationships", Icon: HeartHandshake }, { id: "user-round", label: "Friend or person", category: "Relationships", Icon: UserRound }, { id: "baby", label: "Child", category: "Relationships", Icon: Baby }, { id: "hand-heart", label: "Caregiver", category: "Relationships", Icon: HandHeart }, { id: "briefcase-business", label: "Colleague", category: "Relationships", Icon: BriefcaseBusiness }, { id: "house", label: "Neighbor", category: "Relationships", Icon: House }, { id: "circle", label: "Generic", category: "Relationships", Icon: Circle },
+  { id: "camera", label: "Instagram or photos", category: "Social", Icon: Camera }, { id: "youtube", label: "YouTube or video channel", category: "Social", Icon: Youtube }, { id: "video", label: "TikTok or short video", category: "Social", Icon: Video }, { id: "briefcase-business", label: "LinkedIn or career network", category: "Social", Icon: BriefcaseBusiness }, { id: "users", label: "Facebook or community", category: "Social", Icon: Users }, { id: "message-circle", label: "WhatsApp or chat", category: "Social", Icon: MessageCircle }, { id: "at-sign", label: "Email or contact", category: "Social", Icon: AtSign }, { id: "share-2", label: "Sharing or social", category: "Social", Icon: Share2 }, { id: "radio", label: "Podcast or broadcast", category: "Social", Icon: Radio }, { id: "circle", label: "Generic", category: "Social", Icon: Circle },
   { id: "house", label: "Home", category: "Home", Icon: House }, { id: "building", label: "Property", category: "Home", Icon: Building }, { id: "mountain", label: "Land", category: "Home", Icon: Mountain }, { id: "trees", label: "Garden", category: "Home", Icon: Trees }, { id: "key-round", label: "Keys", category: "Home", Icon: KeyRound }, { id: "sofa", label: "Living", category: "Home", Icon: Sofa }, { id: "circle", label: "Generic", category: "Home", Icon: Circle },
   { id: "wallet", label: "Wallet", category: "Money", Icon: Wallet }, { id: "piggy-bank", label: "Savings", category: "Money", Icon: PiggyBank }, { id: "credit-card", label: "Card", category: "Money", Icon: CreditCard }, { id: "banknote", label: "Income", category: "Money", Icon: Banknote }, { id: "receipt", label: "Bills", category: "Money", Icon: Receipt }, { id: "trending-up", label: "Invest", category: "Money", Icon: TrendingUp }, { id: "circle", label: "Generic", category: "Money", Icon: Circle },
   { id: "bike", label: "Bike", category: "Transport", Icon: Bike }, { id: "car", label: "Car", category: "Transport", Icon: Car }, { id: "bus", label: "Bus", category: "Transport", Icon: Bus }, { id: "plane", label: "Travel", category: "Transport", Icon: Plane }, { id: "train", label: "Train", category: "Transport", Icon: TrainFront }, { id: "footprints", label: "Walking", category: "Transport", Icon: Footprints }, { id: "circle", label: "Generic", category: "Transport", Icon: Circle },
@@ -499,7 +523,7 @@ export default function ResourceMindMapPreview() {
     return height + 32 + (textLines(name, 34) - 1) * 16 + (details ? 6 + textLines(details, 42) * 14 : 0);
   }, 0);
   const objectiveHeight = objective ? 42 + (textLines(objective, 42) - 1) * 16 : 0;
-  let cardHeight = Math.min(560, 94 + objectiveHeight + (actions.length ? 26 + actionRowsHeight : 0) + (iconPickerOpen ? 148 : 0));
+  let cardHeight = Math.min(560, 94 + objectiveHeight + (actions.length ? 26 + actionRowsHeight : 0) + (iconPickerOpen ? 182 : 0));
   let cardPosition: { x: number; y: number } | null = null;
   if (layout && hoveredNode && showFeedbackCard) {
     const [left, top, viewWidth, viewHeight] = layout.viewBox.split(" ").map(Number);

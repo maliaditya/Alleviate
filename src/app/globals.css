@@ -49,7 +49,7 @@ button, input { font: inherit; }
 .resource-map-icon-settings { width: 28px; height: 28px; flex: none; display: grid; place-items: center; border: 1px solid #ffffff18; border-radius: 8px; color: #aeb8c8; background: #ffffff08; cursor: pointer; }
 .resource-map-icon-settings:hover, .resource-map-icon-settings[aria-expanded="true"] { color: #fff; border-color: #a78bfa77; background: #8b5cf626; }
 .resource-map-icon-picker-panel { margin-top: 9px; padding: 8px; border: 1px solid #ffffff14; border-radius: 9px; background: #11151d; }
-.resource-map-icon-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+.resource-map-icon-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
 .resource-map-icon-tabs button { min-width: 0; height: 25px; overflow: hidden; border: 1px solid transparent; border-radius: 6px; color: #9da7b7; background: transparent; font: inherit; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .resource-map-icon-tabs button:hover { color: #fff; background: #ffffff0a; }
 .resource-map-icon-tabs button.is-active { color: #eee8ff; border-color: #a78bfa55; background: #8b5cf626; }
