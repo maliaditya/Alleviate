@@ -66,9 +66,9 @@ button, input { font: inherit; }
 .resource-map-nodes .resource-map-task-progress line { stroke: #ffffff55; stroke-width: 1px; }
 .resource-map-nodes .resource-map-task-progress text { fill: #eee8ff; font-size: 8px; font-weight: 700; text-anchor: middle; pointer-events: none; }
 .matrix-page { width: 100%; height: 100vh; height: 100dvh; min-height: 0; overflow: hidden; background: #1b1b1b; }
-.matrix-main { width: 100%; height: 100%; overflow: hidden; }
+.matrix-main { width: calc(100% - 64px); height: 100%; margin-left: 64px; overflow: hidden; }
 .mindmap-library-bar > .mindmap-brand { display: none; }
-.matrix-content { width: 100%; height: 100%; max-width: none; min-height: 0; margin: 0; padding: 12px 14px; }
+.matrix-content { width: 100%; height: 100%; max-width: none; min-height: 0; margin: 0; padding: 12px 14px; display: flex; flex-direction: column; }
 .matrix-heading { display: none; }
 .matrix-heading-stats { display: flex; align-items: center; gap: 8px; }
 .matrix-heading-stats > span, .matrix-heading-stats > a { min-height: 36px; padding: 0 12px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid #ffffff18; border-radius: 10px; color: #adb6c4; background: #ffffff05; font-size: 12px; text-decoration: none; white-space: nowrap; }
@@ -2173,6 +2173,11 @@ body,
   .sidebar-link { width: 40px; height: 42px; flex: 0 0 40px; border-radius: 10px; }
   .sidebar-bottom-actions { display: none; }
   .home-page { height: 100dvh; }
+  .matrix-page { height: 100dvh; }
+  .matrix-page > .home-sidebar { inset: auto 0 0; width: 100%; height: calc(58px + env(safe-area-inset-bottom)); padding: 4px 6px calc(4px + env(safe-area-inset-bottom)); flex-direction: row; justify-content: center; border-top: 1px solid #ffffff14; border-right: 0; background: #202020f5; backdrop-filter: blur(14px); }
+  .matrix-page .home-sidebar-nav { width: 100%; max-height: none; flex: 1; flex-direction: row; justify-content: space-around; gap: 2px; overflow-x: auto; overflow-y: hidden; }
+  .matrix-page .sidebar-bottom-actions { display: none; }
+  .matrix-main { width: 100%; height: calc(100% - 58px - env(safe-area-inset-bottom)); margin-left: 0; }
   .home-main, .countdown-main, .mindmap-editor-shell {
     width: 100%;
     margin-left: 0;

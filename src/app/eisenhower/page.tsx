@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState, type DragEvent } from "react";
 import { CalendarDays, Check, ChevronDown, Trash2 } from "lucide-react";
+import AppSidebar from "../AppSidebar";
 
 const STORAGE_KEY = "alleviate-eisenhower-tasks-v1";
 const CALENDAR_KEY = "alleviate-calendar-events-v1";
@@ -108,6 +109,7 @@ export default function EisenhowerPage() {
   const scheduledToday = calendarTasks.filter((task) => occursToday(task, today)).map((task): MatrixTask => ({ id: `calendar:${task.id}`, title: task.title, quadrant: scheduledQuadrants[task.id] ?? "eliminate", done: task.completedDates?.includes(today) || false, createdAt: 0 }));
   const allTasks = [...tasks, ...scheduledToday];
   return <main className="matrix-page">
+    <AppSidebar active="eisenhower" />
     <div className="matrix-main">
       <section className="matrix-content">
         <div className="matrix-grid">
