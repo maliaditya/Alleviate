@@ -8,8 +8,12 @@ import { syncAllFeedbackActionTitles, syncFeedbackActionTitle } from "../lib/fee
 const EVENTS_KEY = "alleviate-calendar-events-v1";
 const LOOPS_KEY = "alleviate-feedback-loops-v1";
 const DAY_START_KEY = "alleviate-calendar-day-start-v1";
+const FINANCE_KEY = "alleviate-finance-v1";
 type CalendarEvent = { id: string; title: string; date: string; time: string; endTime?: string; note: string; color?: number; repeat?: { interval: number; unit: "day"; until?: string; skipWeekdays?: number[] }; completedDates?: string[]; feedbackAction?: { object: string; actionId: string } };
 type ReadingEvent = { id: string; object: string; metric: string; value: number; unit: string; note: string; date: string };
+type FinanceEntry = { amount?: number; flow?: "inflow" | "outflow"; date?: string; recurrence?: { intervalMonths?: number } | null };
+type FinanceObjective = { entries?: FinanceEntry[] };
+type FinanceData = Record<string, FinanceObjective>;
 
 function dateKey(date: Date) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`; }
 function parseDate(key: string) { return new Date(`${key}T12:00:00`); }
@@ -53,6 +57,27 @@ function readReadings(): ReadingEvent[] {
     });
   } catch { return []; }
 }
+function readFinance(): FinanceData {
+  try {
+    const value = JSON.parse(localStorage.getItem(FINANCE_KEY) || "{}");
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch { return {}; }
+}
+function monthlyFinanceTotals(finance: FinanceData, year: number, monthIndex: number) {
+  const totals = { inflow: 0, outflow: 0, net: 0 };
+  Object.values(finance).forEach((objective) => (Array.isArray(objective.entries) ? objective.entries : []).forEach((entry) => {
+    if (!entry.date || (entry.flow !== "inflow" && entry.flow !== "outflow")) return;
+    const [entryYear, entryMonth] = entry.date.split("-").map(Number);
+    const monthDelta = year * 12 + monthIndex - (entryYear * 12 + entryMonth - 1);
+    const interval = Number(entry.recurrence?.intervalMonths) || 0;
+    if (monthDelta < 0 || (interval > 0 ? monthDelta % interval !== 0 : monthDelta !== 0)) return;
+    const amount = Number(entry.amount) || 0;
+    totals[entry.flow] += amount;
+    totals.net += entry.flow === "inflow" ? amount : -amount;
+  }));
+  return totals;
+}
+const financeMoney = (amount: number) => new Intl.NumberFormat(undefined, { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(amount);
 
 export default function CalendarPage() {
   const [now, setNow] = useState(() => new Date());
@@ -60,6 +85,7 @@ export default function CalendarPage() {
   const [selectedDate, setSelectedDate] = useState(() => dateKey(new Date()));
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [readings, setReadings] = useState<ReadingEvent[]>([]);
+  const [finance, setFinance] = useState<FinanceData>({});
   const [showForm, setShowForm] = useState(false);
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [view, setView] = useState<"year" | "month" | "week" | "day" | "agenda" | "multi-day">("week");
@@ -99,13 +125,14 @@ export default function CalendarPage() {
   }, []);
 
   useEffect(() => {
-    const refresh = () => { const nextEvents = readEvents(); eventsRef.current = nextEvents; setEvents(nextEvents); setReadings(readReadings()); };
+    const refresh = () => { const nextEvents = readEvents(); eventsRef.current = nextEvents; setEvents(nextEvents); setReadings(readReadings()); setFinance(readFinance()); };
     syncAllFeedbackActionTitles();
     refresh();
     window.addEventListener("storage", refresh);
     window.addEventListener("feedback-loops-updated", refresh);
     window.addEventListener("calendar-events-updated", refresh);
-    return () => { window.removeEventListener("storage", refresh); window.removeEventListener("feedback-loops-updated", refresh); window.removeEventListener("calendar-events-updated", refresh); };
+    window.addEventListener("finance-updated", refresh);
+    return () => { window.removeEventListener("storage", refresh); window.removeEventListener("feedback-loops-updated", refresh); window.removeEventListener("calendar-events-updated", refresh); window.removeEventListener("finance-updated", refresh); };
   }, []);
 
   useEffect(() => {
@@ -329,6 +356,7 @@ export default function CalendarPage() {
             const dayCount = new Date(year, monthIndex + 1, 0).getDate();
             const cellCount = Math.ceil((firstDay + dayCount) / 7) * 7;
             const monthDate = new Date(year, monthIndex, 1);
+            const financeTotals = monthlyFinanceTotals(finance, year, monthIndex);
             return <article className="calendar-year-month" key={`${year}-${monthIndex}`}>
               <button type="button" className="calendar-year-month-title" onClick={() => {
                 const selectedDay = Number(selectedDate.slice(-2)) || 1;
@@ -346,6 +374,11 @@ export default function CalendarPage() {
                 const hasItems = events.some((event) => eventOccursOnDate(event, key)) || readings.some((reading) => reading.date === key);
                 return <button type="button" key={key} className={`${key === dateKey(now) ? "is-today" : ""} ${key === selectedDate ? "is-selected" : ""} ${hasItems ? "has-items" : ""}`} aria-label={`${day.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" })}${hasItems ? ", has items" : ""}`} onClick={() => { selectMonthDay(day); setView("month"); }}>{dayNumber}</button>;
               })}</div>
+              <footer className="calendar-finance-month-summary" aria-label={`${monthDate.toLocaleDateString(undefined, { month: "long" })} finance totals`}>
+                <span><small>INFLOW</small><b className="is-positive">{financeTotals.inflow > 0 ? "+" : ""}{financeMoney(financeTotals.inflow)}</b></span>
+                <span><small>OUTFLOW</small><b className="is-negative">{financeTotals.outflow > 0 ? "−" : ""}{financeMoney(financeTotals.outflow)}</b></span>
+                <span><small>NET</small><b className={financeTotals.net > 0 ? "is-positive" : financeTotals.net < 0 ? "is-negative" : ""}>{financeTotals.net > 0 ? "+" : financeTotals.net < 0 ? "−" : ""}{financeMoney(Math.abs(financeTotals.net))}</b></span>
+              </footer>
             </article>;
           })}
         </section>}

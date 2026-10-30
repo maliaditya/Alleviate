@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { ArrowRight, BarChart3, CalendarPlus, Check, ChevronLeft, ChevronRight, Pencil, Plus, Repeat2, Target, Trash2, Wrench } from "lucide-react";
 import { taskScheduleSummary, type TaskScheduleSummaryInput } from "../../lib/taskScheduleSummary";
@@ -8,10 +8,14 @@ import { taskScheduleSummary, type TaskScheduleSummaryInput } from "../../lib/ta
 type Cadence = "day" | "week" | "month";
 type Reading = { id: string; date: string; value: number; note?: string; inputValues?: Record<string, string> };
 type PreparationRecord = { id: string; date: string; note: string };
-type InputVariable = { id: string; name: string; value: string; tools: string };
+type InputVariable = { id: string; name: string; value: string; strategy: string; resources: string };
 type LoopAction = { id: string; name: string; details: string; inputId: string; complete: boolean; completedDate?: string; dueDate?: string };
 type LoopVersion = { id: string; date: string; hypothesis: string; change: string; factorId?: string; learning?: string; adjustment?: string };
 export type Loop = {
+  situationContext?: string;
+  situationProblem?: string;
+  situationEvidence?: string;
+  situationImpact?: string;
   objective: string;
   objectiveType: "maintain" | "fix" | "upgrade" | "create" | "prepare";
   metric: string;
@@ -23,13 +27,13 @@ export type Loop = {
   versions: LoopVersion[];
   reviewLearning: string;
   nextAdjustment: string;
-  inputs: InputVariable[];
+  inputs: Array<InputVariable & { tools?: string }>;
   actions: LoopAction[];
   readyBy?: string;
   readiness?: string;
   preparationRecords?: PreparationRecord[];
 };
-export const EMPTY_LOOP: Loop = { objective: "", objectiveType: "upgrade", metric: "Outcome", unit: "", baseline: "", target: "", cadence: "week", readings: [], versions: [], reviewLearning: "", nextAdjustment: "", inputs: [], actions: [], readyBy: "", readiness: "", preparationRecords: [] };
+export const EMPTY_LOOP: Loop = { situationContext: "", situationProblem: "", situationEvidence: "", situationImpact: "", objective: "", objectiveType: "upgrade", metric: "Outcome", unit: "", baseline: "", target: "", cadence: "week", readings: [], versions: [], reviewLearning: "", nextAdjustment: "", inputs: [], actions: [], readyBy: "", readiness: "", preparationRecords: [] };
 function localDateKey() {
   const date = new Date();
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -40,6 +44,7 @@ function scheduleActionUrl(object: string, action: LoopAction) {
 }
 type LinkedSchedule = TaskScheduleSummaryInput & { feedbackAction: { object: string; actionId: string } };
 export default function FeedbackLoopCard({ name, loop, onUpdate, compact = false, schedules = [] }: { name: string; loop: Loop; onUpdate: (patch: Partial<Loop>) => void; compact?: boolean; schedules?: LinkedSchedule[] }) {
+  const [financeTotals, setFinanceTotals] = useState({ income: 0, cost: 0 });
   const [logDate, setLogDate] = useState(localDateKey);
   const [logValue, setLogValue] = useState("");
   const [logNote, setLogNote] = useState("");
@@ -50,6 +55,26 @@ export default function FeedbackLoopCard({ name, loop, onUpdate, compact = false
   const [experimentExpectation, setExperimentExpectation] = useState("");
   const [experimentLearning, setExperimentLearning] = useState("");
   const [experimentNextStep, setExperimentNextStep] = useState("");
+  useEffect(() => {
+    const refreshFinance = () => {
+      try {
+        const stored = JSON.parse(localStorage.getItem("alleviate-finance-v1") || "{}");
+        const objective = typeof loop.objective === "string" ? loop.objective : "";
+        const record = stored && typeof stored === "object" ? stored[objective] : null;
+        const entries = Array.isArray(record?.entries) ? record.entries : [];
+        setFinanceTotals(entries.reduce((totals: { income: number; cost: number }, entry: { amount?: number; flow?: string }) => {
+          const amount = Number(entry.amount) || 0;
+          if (entry.flow === "inflow") totals.income += amount;
+          if (entry.flow === "outflow") totals.cost += amount;
+          return totals;
+        }, { income: 0, cost: 0 }));
+      } catch { setFinanceTotals({ income: 0, cost: 0 }); }
+    };
+    refreshFinance();
+    window.addEventListener("storage", refreshFinance);
+    window.addEventListener("finance-updated", refreshFinance);
+    return () => { window.removeEventListener("storage", refreshFinance); window.removeEventListener("finance-updated", refreshFinance); };
+  }, [loop.objective]);
   const [reviewInputId, setReviewInputId] = useState("");
   const [reviewNewFactorName, setReviewNewFactorName] = useState("");
   const [reviewValue, setReviewValue] = useState("");
@@ -60,7 +85,7 @@ export default function FeedbackLoopCard({ name, loop, onUpdate, compact = false
   const [experimentFactorId, setExperimentFactorId] = useState("all");
   const [historyRowsPerPage, setHistoryRowsPerPage] = useState(5);
   const [historyPage, setHistoryPage] = useState(1);
-  const [compactEditing, setCompactEditing] = useState<"outcome" | "factors" | "actions" | null>(null);
+  const [compactEditing, setCompactEditing] = useState<"situation" | "outcome" | "factors" | "actions" | null>(null);
   const [editingActionId, setEditingActionId] = useState<string | null>(null);
   const [actionNameDraft, setActionNameDraft] = useState("");
   const actionNameInputRef = useRef<HTMLInputElement>(null);
@@ -148,7 +173,7 @@ export default function FeedbackLoopCard({ name, loop, onUpdate, compact = false
       const name = reviewNewFactorName.trim();
       const nextValue = reviewValue.trim();
       if (!name || !nextValue) return;
-      const input: InputVariable = { id: crypto.randomUUID(), name, value: nextValue, tools: "" };
+      const input: InputVariable = { id: crypto.randomUUID(), name, value: nextValue, strategy: "", resources: "" };
       const version: LoopVersion = {
         id: crypto.randomUUID(), date: localDateKey(), hypothesis: reviewExpectation.trim() || "No expectation recorded",
         change: `New factor: ${name} → ${nextValue}`, factorId: input.id, learning: loop.reviewLearning.trim() || undefined, adjustment: loop.nextAdjustment.trim() || undefined,
@@ -175,7 +200,7 @@ export default function FeedbackLoopCard({ name, loop, onUpdate, compact = false
     setLogInputValues((values) => ({ ...values, [currentReviewInput.id]: nextValue }));
     setReviewValue(""); setReviewExpectation("");
   };
-  const addInput = () => onUpdate({ inputs: [...(loop.inputs || []), { id: crypto.randomUUID(), name: "", value: "", tools: "" }] });
+  const addInput = () => onUpdate({ inputs: [...(loop.inputs || []), { id: crypto.randomUUID(), name: "", value: "", strategy: "", resources: "" }] });
   const updateInput = (id: string, patch: Partial<InputVariable>) => onUpdate({ inputs: (loop.inputs || []).map((input) => input.id === id ? { ...input, ...patch } : input) });
   const removeInput = (id: string) => {
     if (experimentFactorId === id) { setExperimentFactorId("all"); setExperimentPage(1); }
@@ -201,21 +226,21 @@ export default function FeedbackLoopCard({ name, loop, onUpdate, compact = false
 
   return (
     <article className="feedback-card">
-      <header className="feedback-card-heading"><span className="feedback-object-icon"><Repeat2 size={19} /></span><div><small>OBJECT</small><h2>{name}</h2></div><span className={`feedback-status ${((isMaintenance || isPrepare) && loop.actions.length > 0 && completedMaintenanceTasks === loop.actions.length) || (!isMaintenance && !isPrepare && targetReached) ? "is-complete" : ""}`}>{cardStatus}</span></header>
+      <header className="feedback-card-heading"><span className="feedback-object-icon"><Repeat2 size={19} /></span><div className="feedback-object-title"><small>OBJECT</small><h2>{name}</h2></div><div className="feedback-finance-totals" aria-label="Finance totals for this objective">{financeTotals.cost > 0 && <span><small>COST</small><strong>−{new Intl.NumberFormat(undefined, { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(financeTotals.cost)}</strong></span>}{financeTotals.income > 0 && <span><small>INCOME</small><strong>+{new Intl.NumberFormat(undefined, { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(financeTotals.income)}</strong></span>}</div><span className={`feedback-status ${((isMaintenance || isPrepare) && loop.actions.length > 0 && completedMaintenanceTasks === loop.actions.length) || (!isMaintenance && !isPrepare && targetReached) ? "is-complete" : ""}`}>{cardStatus}</span></header>
       <div className="feedback-tabs" role="tablist" aria-label={`${name} feedback loop`}>
         {(isPrepare ? ["overview", "setup", "tasks", "log", "review", "experiments", "history"] as const : isMaintenance ? ["overview", "setup", "log", "review"] as const : ["overview", "setup", "log", "review", "experiments", "history"] as const).map((tab) => <button key={tab} type="button" role="tab" aria-selected={activeTab === tab} className={activeTab === tab ? "is-active" : ""} onClick={() => setActiveTab(tab)}>{tab === "overview" ? "Overview" : tab === "setup" ? "Plan" : tab === "tasks" ? "Tasks" : tab === "log" ? isMaintenance ? "Tasks" : "Record" : tab === "review" ? isMaintenance ? "Status" : "Learn" : tab === "experiments" ? "Experiments" : "History"}</button>)}
       </div>
 
       {activeTab === "overview" && <section className="feedback-tab-panel feedback-overview" role="tabpanel" aria-label="Influences and actions overview">
         <div className="feedback-overview-outcome"><div className="feedback-overview-outcome-heading"><span>{isPrepare ? "PREPARATION" : "OUTCOME"}</span><button type="button" className="feedback-overview-edit" aria-label={isPrepare ? "Edit preparation plan" : "Edit outcome"} title={isPrepare ? "Edit preparation plan" : "Edit outcome"} onClick={() => { setCompactEditing("outcome"); setActiveTab("setup"); }}><Pencil size={14} /></button></div><strong>{loop.objective || (isPrepare ? "No preparation goal set yet" : "No outcome set yet")}</strong>{isPrepare && <div className="feedback-compact-metrics">{loop.readyBy && <span>Ready by <b>{loop.readyBy}</b></span>}{loop.readiness && <span>{loop.readiness}</span>}<span>{completedMaintenanceTasks} of {loop.actions.length} steps complete</span></div>}</div>
-        <div className="feedback-overview-table-wrap"><table className="feedback-overview-table"><thead><tr>{isPrepare ? <><th scope="col">Preparation step</th><th scope="col">Due by</th><th scope="col">Status</th></> : <><th scope="col">Influence</th><th scope="col">Methods</th><th scope="col">Actions</th></>}</tr></thead><tbody>
-          {isPrepare ? loop.actions.length ? loop.actions.map((action) => <tr key={action.id}><th scope="row">{action.name || "Untitled step"}</th><td>{action.dueDate || <span className="feedback-overview-empty">—</span>}</td><td>{action.complete ? "Complete" : "To do"}</td></tr>) : <tr><td colSpan={3} className="feedback-overview-empty">Add preparation steps in Plan to see them here.</td></tr> : isMaintenance ? <tr><th scope="row">Maintenance</th><td><span className="feedback-overview-empty">—</span></td><td>{loop.actions.length ? <ul>{loop.actions.map((action) => <li key={action.id}><strong>{action.name || "Untitled action"}</strong>{action.details && <span>{action.details}</span>}</li>)}</ul> : <span className="feedback-overview-empty">No actions added yet.</span>}</td></tr> : <>
+        <div className="feedback-overview-table-wrap"><table className="feedback-overview-table"><thead><tr>{isPrepare ? <><th scope="col">Preparation step</th><th scope="col">Due by</th><th scope="col">Status</th></> : <><th scope="col">Influence</th><th scope="col">Strategy</th><th scope="col">Resources</th><th scope="col">Actions</th></>}</tr></thead><tbody>
+          {isPrepare ? loop.actions.length ? loop.actions.map((action) => <tr key={action.id}><th scope="row">{action.name || "Untitled step"}</th><td>{action.dueDate || <span className="feedback-overview-empty">—</span>}</td><td>{action.complete ? "Complete" : "To do"}</td></tr>) : <tr><td colSpan={3} className="feedback-overview-empty">Add preparation steps in Plan to see them here.</td></tr> : isMaintenance ? <tr><th scope="row">Maintenance</th><td><span className="feedback-overview-empty">—</span></td><td><span className="feedback-overview-empty">—</span></td><td>{loop.actions.length ? <ul>{loop.actions.map((action) => <li key={action.id}><strong>{action.name || "Untitled action"}</strong>{action.details && <span>{action.details}</span>}</li>)}</ul> : <span className="feedback-overview-empty">No actions added yet.</span>}</td></tr> : <>
             {loop.inputs.map((input) => {
               const linkedActions = loop.actions.filter((action) => action.inputId === input.id);
-              return <tr key={input.id}><th scope="row"><strong>{input.name || "Untitled influence"}</strong>{input.value && <span className="feedback-overview-influence-value">{input.value}</span>}</th><td>{input.tools || <span className="feedback-overview-empty">—</span>}</td><td>{linkedActions.length ? <ul>{linkedActions.map((action) => <li key={action.id}><strong>{action.name || "Untitled action"}</strong>{action.details && <span>{action.details}</span>}</li>)}</ul> : <span className="feedback-overview-empty">No actions linked.</span>}</td></tr>;
+              return <tr key={input.id}><th scope="row"><strong>{input.name || "Untitled influence"}</strong>{input.value && <span className="feedback-overview-influence-value">{input.value}</span>}</th><td>{input.strategy || <span className="feedback-overview-empty">—</span>}</td><td>{input.resources || <span className="feedback-overview-empty">—</span>}</td><td>{linkedActions.length ? <ul>{linkedActions.map((action) => <li key={action.id}><strong>{action.name || "Untitled action"}</strong>{action.details && <span>{action.details}</span>}</li>)}</ul> : <span className="feedback-overview-empty">No actions linked.</span>}</td></tr>;
             })}
-            {loop.actions.some((action) => !action.inputId || !loop.inputs.some((input) => input.id === action.inputId)) && <tr><th scope="row">No influence selected</th><td><span className="feedback-overview-empty">—</span></td><td><ul>{loop.actions.filter((action) => !action.inputId || !loop.inputs.some((input) => input.id === action.inputId)).map((action) => <li key={action.id}><strong>{action.name || "Untitled action"}</strong>{action.details && <span>{action.details}</span>}</li>)}</ul></td></tr>}
-            {!loop.inputs.length && !loop.actions.length && <tr><td colSpan={3} className="feedback-overview-empty">Add an influence and actions in Plan to see them here.</td></tr>}
+            {loop.actions.some((action) => !action.inputId || !loop.inputs.some((input) => input.id === action.inputId)) && <tr><th scope="row">No influence selected</th><td><span className="feedback-overview-empty">—</span></td><td><span className="feedback-overview-empty">—</span></td><td><ul>{loop.actions.filter((action) => !action.inputId || !loop.inputs.some((input) => input.id === action.inputId)).map((action) => <li key={action.id}><strong>{action.name || "Untitled action"}</strong>{action.details && <span>{action.details}</span>}</li>)}</ul></td></tr>}
+            {!loop.inputs.length && !loop.actions.length && <tr><td colSpan={4} className="feedback-overview-empty">Add an influence and actions in Plan to see them here.</td></tr>}
           </>}
         </tbody></table></div>
       </section>}
@@ -224,8 +249,18 @@ export default function FeedbackLoopCard({ name, loop, onUpdate, compact = false
         {!compact && <><p className="feedback-panel-intro">Choose the kind of task first. The plan will only ask for details that fit that task.</p>
         <div className="feedback-task-type-picker"><label className="feedback-field"><span>What kind of task is this?</span><select value={loop.objectiveType} onChange={(event) => onUpdate({ objectiveType: event.target.value as Loop["objectiveType"] })}><option value="maintain">Maintain an asset or routine</option><option value="fix">Fix a problem</option><option value="upgrade">Improve an outcome</option><option value="create">Create something new</option><option value="prepare">Prepare for something</option></select></label><p>{isMaintenance ? "Use this for a car, house, equipment, or routine you want to keep in good condition. No starting or goal number is needed." : isPrepare ? "Plan what you need to do before an upcoming event, decision, or milestone." : "Set a result to track, note factors you can influence, and choose actions that may help."}</p></div>
         {!isMaintenance && !isPrepare && <div className="feedback-cause-flow" aria-label="Actions influence factors, which may affect the outcome"><span>Actions</span><ArrowRight size={16} /><span>Things you can change</span><ArrowRight size={16} /><span>Outcome you track</span></div>}</>}
+        <section className="feedback-setup-section feedback-situation-section">
+          <header><div><span className="feedback-step-number">1</span><h3>Situation</h3><p>Describe what is happening and why it matters.</p></div>{compact && <button type="button" className="secondary-btn" onClick={() => setCompactEditing(compactEditing === "situation" ? null : "situation")}>{compactEditing === "situation" ? "Done" : "Edit"}</button>}</header>
+          {compact && compactEditing !== "situation" && <div className="feedback-compact-summary feedback-compact-situation">{([ ["Context", loop.situationContext], ["Problem", loop.situationProblem], ["Evidence", loop.situationEvidence], ["Impact", loop.situationImpact] ] as const).map(([label, value]) => <div className="feedback-compact-item" key={label}><strong>{label}</strong><span>{value || "Not added"}</span></div>)}</div>}
+          {(!compact || compactEditing === "situation") && <div className="feedback-form-grid feedback-situation-grid">
+            <label className="feedback-field"><span>Context</span><textarea value={loop.situationContext || ""} onChange={(event) => onUpdate({ situationContext: event.target.value })} placeholder="What is the current situation?" rows={2} /></label>
+            <label className="feedback-field"><span>Problem</span><textarea value={loop.situationProblem || ""} onChange={(event) => onUpdate({ situationProblem: event.target.value })} placeholder="What is wrong, missing or needs improvement?" rows={2} /></label>
+            <label className="feedback-field"><span>Evidence</span><textarea value={loop.situationEvidence || ""} onChange={(event) => onUpdate({ situationEvidence: event.target.value })} placeholder="What information confirms the problem exists?" rows={2} /></label>
+            <label className="feedback-field"><span>Impact</span><textarea value={loop.situationImpact || ""} onChange={(event) => onUpdate({ situationImpact: event.target.value })} placeholder="Why does this problem matter?" rows={2} /></label>
+          </div>}
+        </section>
         <section className="feedback-setup-section feedback-outcome-section">
-          <header><div><span className="feedback-step-number">1</span><h3>{compact ? isPrepare ? "Preparation" : "Outcome" : isMaintenance ? "Name what you are maintaining" : isPrepare ? "Plan your preparation" : loop.objectiveType === "fix" ? "Describe the problem" : loop.objectiveType === "create" ? "Describe what you want to create" : "Choose the outcome"}</h3><p>{compact ? isMaintenance ? "What you want to keep in good shape" : isPrepare ? "What you are getting ready for" : "The result you want to improve" : isMaintenance ? "For example: keep the car safe and reliable." : isPrepare ? "Define what ready looks like and when you need to be ready." : "This is the result you will track while you test changes."}</p></div>{compact && <button type="button" className="secondary-btn" onClick={() => setCompactEditing(compactEditing === "outcome" ? null : "outcome")}>{compactEditing === "outcome" ? "Done" : "Edit"}</button>}</header>
+          <header><div><span className="feedback-step-number">2</span><h3>{compact ? isPrepare ? "Preparation" : "Outcome" : isMaintenance ? "Name what you are maintaining" : isPrepare ? "Plan your preparation" : loop.objectiveType === "fix" ? "Describe the problem" : loop.objectiveType === "create" ? "Describe what you want to create" : "Choose the outcome"}</h3><p>{compact ? isMaintenance ? "What you want to keep in good shape" : isPrepare ? "What you are getting ready for" : "The result you want to improve" : isMaintenance ? "For example: keep the car safe and reliable." : isPrepare ? "Define what ready looks like and when you need to be ready." : "This is the result you will track while you test changes."}</p></div>{compact && <button type="button" className="secondary-btn" onClick={() => setCompactEditing(compactEditing === "outcome" ? null : "outcome")}>{compactEditing === "outcome" ? "Done" : "Edit"}</button>}</header>
           {compact && compactEditing !== "outcome" && <div className="feedback-compact-summary feedback-compact-outcome"><strong>{loop.objective || (isMaintenance ? "No maintenance goal set" : isPrepare ? "No preparation goal set" : "No outcome set")}</strong>{isPrepare ? <div className="feedback-compact-metrics">{loop.readyBy && <span>Ready by <b>{loop.readyBy}</b></span>}{loop.readiness && <span>{loop.readiness}</span>}</div> : !isMaintenance && <div className="feedback-compact-metrics">{loop.metric && <span>{loop.metric}{loop.unit ? ` · ${loop.unit}` : ""}</span>}{loop.baseline && <span>Start <b>{loop.baseline}{loop.unit ? ` ${loop.unit}` : ""}</b></span>}{loop.target && <span>Goal <b>{loop.target}{loop.unit ? ` ${loop.unit}` : ""}</b></span>}</div>}</div>}
           {(!compact || compactEditing === "outcome") && <div className="feedback-form-grid">
             {compact && <label className="feedback-field"><span>Task type</span><select value={loop.objectiveType} onChange={(event) => onUpdate({ objectiveType: event.target.value as Loop["objectiveType"] })}><option value="maintain">Maintain</option><option value="fix">Fix</option><option value="upgrade">Improve outcome</option><option value="create">Create</option><option value="prepare">Prepare</option></select></label>}
@@ -240,16 +275,17 @@ export default function FeedbackLoopCard({ name, loop, onUpdate, compact = false
           </div>}
         </section>
         {!isMaintenance && <section className="feedback-setup-section">
-          <header><div><span className="feedback-step-number">2</span><h3>{compact ? "Factors you can influence" : "Choose things you can influence"}</h3><p>{compact ? loop.inputs.length ? `${loop.inputs.length} ${loop.inputs.length === 1 ? "factor" : "factors"} tracked` : "No factors added yet" : isPrepare ? "Track things that affect your readiness, such as time, resources, support, or practice." : "These are independent variables: changeable factors that may affect your outcome, like exercise or sleep."}</p></div>{compact ? <div className="feedback-compact-actions"><button className="secondary-btn" type="button" onClick={() => setCompactEditing(compactEditing === "factors" ? null : "factors")}>{compactEditing === "factors" ? "Done" : "Edit"}</button>{compactEditing === "factors" && <button className="secondary-btn" type="button" onClick={addInput}><Plus size={14} /> Add</button>}</div> : <button className="secondary-btn" type="button" onClick={addInput}><Plus size={14} /> Add a factor</button>}</header>
-          {compact && compactEditing !== "factors" && <div className="feedback-compact-summary feedback-compact-grid">{loop.inputs.map((input) => <div className="feedback-compact-item" key={input.id}><strong>{input.name || "Untitled factor"}</strong>{input.value && <span>{input.value}</span>}{input.tools && <small>{input.tools}</small>}</div>)}</div>}
+          <header><div><span className="feedback-step-number">3</span><h3>{compact ? "Factors you can influence" : "Choose things you can influence"}</h3><p>{compact ? loop.inputs.length ? `${loop.inputs.length} ${loop.inputs.length === 1 ? "factor" : "factors"} tracked` : "No factors added yet" : isPrepare ? "Track things that affect your readiness, such as time, resources, support, or practice." : "These are independent variables: changeable factors that may affect your outcome, like exercise or sleep."}</p></div>{compact ? <div className="feedback-compact-actions"><button className="secondary-btn" type="button" onClick={() => setCompactEditing(compactEditing === "factors" ? null : "factors")}>{compactEditing === "factors" ? "Done" : "Edit"}</button>{compactEditing === "factors" && <button className="secondary-btn" type="button" onClick={addInput}><Plus size={14} /> Add</button>}</div> : <button className="secondary-btn" type="button" onClick={addInput}><Plus size={14} /> Add a factor</button>}</header>
+          {compact && compactEditing !== "factors" && <div className="feedback-compact-summary feedback-compact-grid">{loop.inputs.map((input) => <div className="feedback-compact-item" key={input.id}><strong>{input.name || "Untitled factor"}</strong>{input.value && <span>{input.value}</span>}{input.strategy && <small>Strategy: {input.strategy}</small>}{input.resources && <small>Resources: {input.resources}</small>}</div>)}</div>}
           {(!compact || compactEditing === "factors") && (loop.inputs.length ? <div className="feedback-setup-list">{loop.inputs.map((input) => <div className="feedback-input-row" key={input.id}>
             <label className="feedback-field"><span>Factor you can change</span><input value={input.name} onChange={(event) => updateInput(input.id, { name: event.target.value })} placeholder="e.g. Workouts per week" /></label>
             <label className="feedback-field"><span>Current value</span><input value={input.value} onChange={(event) => updateInput(input.id, { value: event.target.value })} placeholder="e.g. 1 workout" /></label>
-            <label className="feedback-field"><span>Methods</span><input value={input.tools} onChange={(event) => updateInput(input.id, { tools: event.target.value })} placeholder="What could help? e.g. Gym membership" /></label>
+            <label className="feedback-field"><span>Strategy</span><input value={input.strategy} onChange={(event) => updateInput(input.id, { strategy: event.target.value })} placeholder="How will you influence this factor?" /></label>
+            <label className="feedback-field"><span>Resources</span><input value={input.resources} onChange={(event) => updateInput(input.id, { resources: event.target.value })} placeholder="What will you need?" /></label>
             <button className="feedback-delete-button" type="button" aria-label={`Remove ${input.name || "input variable"}`} title="Remove input variable" onClick={() => removeInput(input.id)}><Trash2 size={14} /></button>
           </div>)}</div> : <p className="feedback-setup-empty">Add a factor you can change. For example, “workouts per week” may influence the outcome “body weight.”</p>)}
         </section>}
-        <section className="feedback-setup-section">
+        {!compact && <section className="feedback-setup-section">
           <header><div><span className="feedback-step-number">{isMaintenance ? "2" : "3"}</span><h3>{compact ? isMaintenance ? "Maintenance tasks" : isPrepare ? "Preparation steps" : "Actions" : isMaintenance ? "Plan the maintenance tasks" : isPrepare ? "Plan the preparation steps" : "Pick actions to change a factor"}</h3><p>{compact ? loop.actions.length ? `${loop.actions.length} ${loop.actions.length === 1 ? isPrepare ? "step" : "task" : isPrepare ? "steps" : "tasks"} planned` : isPrepare ? "No preparation steps added yet" : "No actions added yet" : isMaintenance ? "Add each upkeep task, then schedule it on your calendar and choose how often it repeats." : isPrepare ? "Break the preparation into clear steps and add a due date when useful." : "Each action should connect to one factor. Actions influence factors; factors may influence the outcome."}</p></div>{compact ? <div className="feedback-compact-actions"><button className="secondary-btn" type="button" onClick={() => setCompactEditing(compactEditing === "actions" ? null : "actions")}>{compactEditing === "actions" ? "Done" : "Edit"}</button>{compactEditing === "actions" && <button className="secondary-btn" type="button" onClick={addAction}><Plus size={14} /> Add</button>}</div> : <button className="secondary-btn" type="button" onClick={addAction}><Plus size={14} /> Add a task</button>}</header>
           {compact && compactEditing !== "actions" && <div className="feedback-compact-summary feedback-compact-grid feedback-compact-action-grid">{loop.actions.map((action) => { const factor = loop.inputs.find((input) => input.id === action.inputId); return <div className={`feedback-compact-item ${action.complete ? "is-complete" : ""}`} key={action.id}><div className="feedback-compact-action-heading">{editingActionId === action.id ? <input ref={actionNameInputRef} className="feedback-inline-action-name" aria-label="Task name" value={actionNameDraft} onChange={(event) => setActionNameDraft(event.target.value)} onBlur={commitActionNameEdit} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitActionNameEdit(); } if (event.key === "Escape") { setEditingActionId(null); } }} /> : <strong onDoubleClick={() => startActionNameEdit(action)} title="Double-click to edit task name">{action.name || "Untitled action"}</strong>}<div className="feedback-compact-action-tools"><button type="button" aria-label={`Edit ${action.name || "action"}`} title="Edit task details" onClick={() => setCompactEditing("actions")}><Pencil size={13} /></button><button type="button" aria-label={`Delete ${action.name || "action"}`} title="Delete task" onClick={() => removeAction(action.id)}><Trash2 size={13} /></button></div></div>{action.details && <span>{action.details}</span>}{isPrepare && action.dueDate && <small>Due {action.dueDate}</small>}{factor && <small>Changes {factor.name || "factor"}</small>}</div>; })}</div>}
           {(!compact || compactEditing === "actions") && (loop.actions.length ? <div className="feedback-setup-list">{loop.actions.map((action) => <div className={`feedback-action-row ${isMaintenance ? "is-maintenance-action" : isPrepare ? "is-prepare-action" : "is-planned-action"}`} key={action.id}>
@@ -258,7 +294,7 @@ export default function FeedbackLoopCard({ name, loop, onUpdate, compact = false
             <Link className="feedback-schedule-action" href={scheduleActionUrl(name, action)} title={`Schedule ${action.name || "action"}`} aria-label={`Schedule ${action.name || "action"}`}><CalendarPlus size={14} /><span>Schedule</span></Link>
             <button className="feedback-delete-button" type="button" aria-label={`Remove ${action.name || "action"}`} title="Remove action" onClick={() => removeAction(action.id)}><Trash2 size={14} /></button>
           </div>)}</div> : <p className="feedback-setup-empty">Add a small action that changes one of your factors. Example: “Go to the gym” changes “workouts per week.”</p>)}
-        </section>
+        </section>}
       </section>}
 
       {activeTab === "tasks" && isPrepare && <section className="feedback-tab-panel" role="tabpanel" aria-label="Preparation tasks">

@@ -2,13 +2,13 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Activity, ArrowDownUp, CalendarDays, Check, CheckSquare, Download, ExternalLink, FolderOpen, Github, Grid2X2, Home, Hourglass, LoaderCircle, Pencil, RefreshCw, Settings2, Upload, X } from "lucide-react";
+import { Activity, ArrowDownUp, CalendarDays, Check, CheckSquare, Download, ExternalLink, FolderOpen, Github, Grid2X2, Home, Hourglass, LoaderCircle, Pencil, RefreshCw, Settings2, Upload, X, Wallet } from "lucide-react";
 import { useAppDialogs } from "./AppDialogs";
 import { createAppBackup, downloadAppBackup, parseAppBackup, restoreAppBackup } from "../lib/appBackup";
 import { requestAppApi } from "../lib/desktopAuth";
 import { applyAlleviateGitHubChanges, clearGitHubConflict, collectAlleviateGitHubFiles, decodeBase64Blob, encodeBlobBase64, getGitHubCheckpoint, getGitHubLastSyncAt, getGitHubSafetyBackup, hashBlob, isSensitiveGitHubBackupPath, isValidCanvasBackupRecord, isValidMindMapBackupRecord, listGitHubConflicts, mergeGitHubFile, saveGitHubCheckpoint, saveGitHubCheckpointBatch, saveGitHubLastSyncAt, saveGitHubRecoveryCopy, saveGitHubSafetyBackup, setGitHubSyncScope, stageGitHubOutbox, type GitHubBackupManifest } from "../lib/githubBackup";
 
-type AppSection = "home" | "canvas" | "books" | "mind-map" | "feedback-loop" | "countdown" | "calendar" | "eisenhower" | "tasks" | "tracking" | "support";
+type AppSection = "home" | "canvas" | "books" | "mind-map" | "feedback-loop" | "countdown" | "calendar" | "eisenhower" | "tasks" | "tracking" | "support" | "finance";
 type AutoBackupSettings = { directoryPath: string; lastRunWeek: string; lastRunAt: string; lastFilePath: string };
 const AUTO_BACKUP_SETTINGS_KEY = "alleviate-auto-backup-settings-v1";
 const profileKey = (username: string) => `alleviate-profile-v1:${username || "guest"}`;
@@ -32,6 +32,7 @@ const items: Array<{ id: AppSection; href: string; label: string; Icon: typeof H
   { id: "tracking", href: "/tasks", label: "Tracking", Icon: Activity },
   { id: "calendar", href: "/calendar", label: "Calendar", Icon: CalendarDays },
   { id: "countdown", href: "/countdown", label: "Countdown", Icon: Hourglass },
+  { id: "finance", href: "/finance", label: "Finance", Icon: Wallet },
 ];
 
 export default function AppSidebar({ active }: { active: AppSection }) {

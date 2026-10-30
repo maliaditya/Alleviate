@@ -12,10 +12,14 @@ const LEGACY_OBJECTS_KEY = "alleviate-wisemapping-objects-v1";
 const LOOPS_KEY = "alleviate-feedback-loops-v1";
 type Cadence = "day" | "week" | "month";
 type Reading = { id: string; date: string; value: number; note?: string; inputValues?: Record<string, string> };
-type InputVariable = { id: string; name: string; value: string; tools: string };
+type InputVariable = { id: string; name: string; value: string; strategy: string; resources: string; tools?: string };
 type LoopAction = { id: string; name: string; details: string; inputId: string; complete: boolean; completedDate?: string; dueDate?: string };
 type LoopVersion = { id: string; date: string; hypothesis: string; change: string; factorId?: string; learning?: string; adjustment?: string };
 type Loop = {
+  situationContext?: string;
+  situationProblem?: string;
+  situationEvidence?: string;
+  situationImpact?: string;
   objective: string;
   objectiveType: "maintain" | "fix" | "upgrade" | "create" | "prepare";
   metric: string;
@@ -34,7 +38,7 @@ type Loop = {
   preparationRecords?: { id: string; date: string; note: string }[];
 };
 type Loops = Record<string, Loop>;
-const EMPTY_LOOP: Loop = { objective: "", objectiveType: "upgrade", metric: "Outcome", unit: "", baseline: "", target: "", cadence: "week", readings: [], versions: [], reviewLearning: "", nextAdjustment: "", inputs: [], actions: [], readyBy: "", readiness: "", preparationRecords: [] };
+const EMPTY_LOOP: Loop = { situationContext: "", situationProblem: "", situationEvidence: "", situationImpact: "", objective: "", objectiveType: "upgrade", metric: "Outcome", unit: "", baseline: "", target: "", cadence: "week", readings: [], versions: [], reviewLearning: "", nextAdjustment: "", inputs: [], actions: [], readyBy: "", readiness: "", preparationRecords: [] };
 
 function objectKey(name: string) { return name.trim().toLocaleLowerCase(); }
 function scheduleActionUrl(object: string, action: LoopAction) {
@@ -69,7 +73,7 @@ function withCurrentObjects(objects: string[], stored: Loops): Loops {
       ...existing,
       readings: existing?.readings || [],
       versions: existing?.versions?.length ? existing.versions : [{ id: "initial", date: localDateKey(), hypothesis: "Starting point", change: "Initial setup" }],
-      inputs: existing?.inputs || [],
+      inputs: (existing?.inputs || []).map((input) => ({ ...input, strategy: input.strategy ?? input.tools ?? "", resources: input.resources ?? "" })),
       actions: existing?.actions || [],
       preparationRecords: existing?.preparationRecords || [],
     };
