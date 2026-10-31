@@ -300,7 +300,7 @@ export default function TaskListPage() {
     const duplicate = current.inputs.find((input) => input.name.trim().toLocaleLowerCase() === factorName.toLocaleLowerCase());
     const input = duplicate
       ? { ...duplicate, value: newFactorValue.trim() || duplicate.value, tools: newFactorTools.trim() || duplicate.tools }
-      : { id: crypto.randomUUID(), name: factorName, value: newFactorValue.trim(), tools: newFactorTools.trim() };
+      : { id: crypto.randomUUID(), name: factorName, value: newFactorValue.trim(), strategy: "", resources: "", tools: newFactorTools.trim() };
     updateObjectLoop(object, {
       inputs: duplicate ? current.inputs.map((item) => item.id === duplicate.id ? input : item) : [...current.inputs, input],
       actions: current.actions.map((action) => action.id === actionId ? { ...action, inputId: input.id } : action),
