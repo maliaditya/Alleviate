@@ -4,7 +4,7 @@ import { useState, type FormEvent } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useEffect } from 'react';
-import { ArrowLeft, Sparkles } from 'lucide-react';
+import { ArrowLeft, Eye, EyeOff, Sparkles } from 'lucide-react';
 import { requestAuthJson, storeDesktopAuthTokens } from '@/lib/desktopAuth';
 import { switchWorkspaceAccount } from '@/lib/workspaceIsolation';
 
@@ -16,6 +16,8 @@ function LoginContent() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -56,8 +58,8 @@ function LoginContent() {
       <form onSubmit={submit} className="auth-form">
         <label>Username or email<input autoComplete="username" value={username} onChange={e => setUsername(e.target.value)} placeholder="Your username or email" required /></label>
         {mode === 'register' && <label>Email address<input type="email" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" required /></label>}
-        <label>Password<input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={8} value={password} onChange={e => setPassword(e.target.value)} placeholder="Enter your password" required /></label>
-        {mode === 'register' && <label>Confirm password<input type="password" autoComplete="new-password" minLength={8} value={confirm} onChange={e => setConfirm(e.target.value)} placeholder="Re-enter your password" required /></label>}
+        <label>Password<span className="auth-password-wrap"><input type={showPassword ? 'text' : 'password'} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={8} value={password} onChange={e => setPassword(e.target.value)} placeholder="Enter your password" required /><button type="button" className="auth-password-toggle" onClick={() => setShowPassword(value => !value)} aria-label={showPassword ? 'Hide password' : 'Show password'} aria-pressed={showPassword}>{showPassword ? <EyeOff size={17} /> : <Eye size={17} />}</button></span></label>
+        {mode === 'register' && <label>Confirm password<span className="auth-password-wrap"><input type={showConfirm ? 'text' : 'password'} autoComplete="new-password" minLength={8} value={confirm} onChange={e => setConfirm(e.target.value)} placeholder="Re-enter your password" required /><button type="button" className="auth-password-toggle" onClick={() => setShowConfirm(value => !value)} aria-label={showConfirm ? 'Hide confirmation password' : 'Show confirmation password'} aria-pressed={showConfirm}>{showConfirm ? <EyeOff size={17} /> : <Eye size={17} />}</button></span></label>}
         {error && <p className="auth-error" role="alert">{error}</p>}
         {notice && <p className="auth-notice" role="status">{notice}</p>}
         <button className="auth-submit" disabled={busy}>{busy ? (mode === 'login' ? 'Signing in…' : 'Creating account…') : (mode === 'login' ? 'Log in' : 'Create account')}</button>

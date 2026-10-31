@@ -1685,6 +1685,11 @@ body,
 .auth-form input { width:100%;height:42px;padding:0 12px;border:1px solid #ffffff1c;border-radius:9px;outline:none;color:#f6f7fb;background:#10131a;font-size:13px; }
 .auth-form input::placeholder { color:#687080; }
 .auth-form input:focus { border-color:#a78bfa;box-shadow:0 0 0 3px #a78bfa20; }
+.auth-password-wrap { position:relative;display:block; }
+.auth-password-wrap input { padding-right:44px; }
+.auth-password-toggle { position:absolute;top:1px;right:1px;width:40px;height:40px;display:grid;place-items:center;border:0;border-radius:8px;color:#939aaa;background:transparent;cursor:pointer; }
+.auth-password-toggle:hover { color:#e9e5ff;background:#ffffff0b; }
+.auth-password-toggle:focus-visible { outline:2px solid #a78bfa;outline-offset:-3px; }
 .auth-submit { height:43px;margin-top:2px;border:1px solid #a78bfa55;border-radius:9px;color:white;background:linear-gradient(110deg,#7655cf,#986fdd);font-size:13px;font-weight:650;cursor:pointer; }
 .auth-submit:hover { filter:brightness(1.08); }
 .auth-submit:disabled { opacity:.65;cursor:wait; }
